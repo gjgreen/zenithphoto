@@ -1,0 +1,94 @@
+export component MainWindow inherits Window {
+    width: 1400px;
+    height: 800px;
+    title: "OpenLight (Rust + Slint)";
+
+    in-out property <image-data> preview-image;
+    in-out property <string> current-path;
+
+    callback open-image-request();
+
+    // Basic layout: left panel (stub), center preview, right controls
+    Row {
+        spacing: 8px;
+        padding: 8px;
+
+        // Left panel (future: folders, collections)
+        VerticalLayout {
+            width: 260px;
+            spacing: 8px;
+
+            Text {
+                text: "Library";
+                font-weight: 600;
+            }
+
+            Button {
+                text: "Open Image…";
+                clicked => {
+                    root.open-image-request();
+                }
+            }
+
+            Text {
+                text: root.current-path;
+                wrap: word-wrap;
+                font-size: 10px;
+                color: #bbbbbb;
+            }
+        }
+
+        // Center: preview
+        Rectangle {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+            background: #202020;
+
+            Image {
+                source: root.preview-image;
+                width: parent.width;
+                height: parent.height;
+                image-fit: contain;
+            }
+        }
+
+        // Right: basic develop sliders (just stubbed; wired later)
+        VerticalLayout {
+            width: 260px;
+            spacing: 12px;
+
+            Text {
+                text: "Develop";
+                font-weight: 600;
+            }
+
+            Text { text: "Exposure"; }
+            Slider {
+                minimum: -5;
+                maximum: 5;
+                value: 0;
+            }
+
+            Text { text: "Contrast"; }
+            Slider {
+                minimum: -100;
+                maximum: 100;
+                value: 0;
+            }
+
+            Text { text: "Highlights"; }
+            Slider {
+                minimum: -100;
+                maximum: 100;
+                value: 0;
+            }
+
+            Text { text: "Shadows"; }
+            Slider {
+                minimum: -100;
+                maximum: 100;
+                value: 0;
+            }
+        }
+    }
+}

@@ -1,0 +1,9 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types = { path = "../core-types" }
+image = "0.25"
+thiserror = "1"

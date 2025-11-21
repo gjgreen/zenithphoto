@@ -1,0 +1,13 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+slint = { version = "1.8", default-features = false, features = ["backend-winit", "renderer-femtovg"] }
+engine = { path = "../../crates/engine" }
+core-types = { path = "../../crates/core-types" }
+
+[build-dependencies]
+slint-build = "1.8"

@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/core-types",
+    "crates/engine",
+    "apps/desktop",
+]
+
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
