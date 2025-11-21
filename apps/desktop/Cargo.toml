@@ -5,9 +5,12 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-slint = { version = "1.8", default-features = false, features = ["backend-winit", "renderer-femtovg"] }
+slint = { version = "1.8", default-features = false, features = ["backend-winit", "renderer-femtovg", "compat-1-2"] }
 engine = { path = "../../crates/engine" }
-core-types = { path = "../../crates/core-types" }
+core-types = { path = "../../core-types" }
+catalog = { path = "../../crates/catalog" }
+app-settings = { path = "../../crates/app-settings" }
+rfd = "0.14"
 
 [build-dependencies]
 slint-build = "1.8"

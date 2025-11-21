@@ -1,8 +1,10 @@
 [workspace]
 members = [
-    "crates/core-types",
+    "core-types",
     "crates/engine",
     "apps/desktop",
+    "crates/catalog",
+    "crates/app-settings",
 ]
 
 resolver = "2"

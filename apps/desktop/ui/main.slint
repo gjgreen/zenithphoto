@@ -1,15 +1,19 @@
+import { CatalogDialog } from "catalog_dialog.slint";
+import { Button, Slider } from "std-widgets.slint";
+export { CatalogDialog }
+
 export component MainWindow inherits Window {
     width: 1400px;
     height: 800px;
-    title: "OpenLight (Rust + Slint)";
+    title: "ZenithPhoto";
 
-    in-out property <image-data> preview-image;
+    in-out property <image> preview_image;
     in-out property <string> current-path;
 
     callback open-image-request();
 
     // Basic layout: left panel (stub), center preview, right controls
-    Row {
+    HorizontalLayout {
         spacing: 8px;
         padding: 8px;
 
@@ -45,7 +49,7 @@ export component MainWindow inherits Window {
             background: #202020;
 
             Image {
-                source: root.preview-image;
+                source: root.preview_image;
                 width: parent.width;
                 height: parent.height;
                 image-fit: contain;

@@ -1,0 +1,66 @@
+import { Button } from "std-widgets.slint";
+
+export component CatalogDialog inherits Window {
+    width: 360px;
+    height: 260px;
+    title: "Choose Catalog";
+    always-on-top: true;
+    in-out property <string> error-text: "";
+
+    callback open-existing-catalog();
+    callback create-new-catalog();
+    callback quit();
+
+    Rectangle {
+        background: #1e1e1e;
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+
+            Text {
+                text: "Choose Catalog";
+                font-weight: 700;
+                font-size: 20px;
+            }
+
+            Text {
+                text: "Select an existing catalog or create a new one to continue.";
+                wrap: word-wrap;
+                color: #c0c0c0;
+            }
+
+            if error-text != "" : Rectangle {
+                background: #34252c;
+                border-radius: 6px;
+                padding: 8px;
+                Text {
+                    text: error-text;
+                    color: #ff7a7a;
+                    wrap: word-wrap;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 8px;
+
+                Button {
+                    text: "Open Existing Catalog…";
+                    horizontal-stretch: 1;
+                    clicked => { root.open-existing-catalog(); }
+                }
+
+                Button {
+                    text: "Create New Catalog…";
+                    horizontal-stretch: 1;
+                    clicked => { root.create-new-catalog(); }
+                }
+
+                Button {
+                    text: "Quit";
+                    horizontal-stretch: 1;
+                    clicked => { root.quit(); }
+                }
+            }
+        }
+    }
+}

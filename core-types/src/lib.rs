@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct ImageId(pub i64);
 
 bitflags::bitflags! {
-    #[derive(Serialize, Deserialize)]
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
     pub struct ImageFlags: u8 {
         const FLAGGED   = 0b0000_0001;
         const REJECTED  = 0b0000_0010;
