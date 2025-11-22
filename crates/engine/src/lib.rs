@@ -22,8 +22,7 @@ impl ImageEngine {
     /// Load a file and return a preview scaled so neither dimension exceeds `max_size`.
     pub fn open_preview<P: AsRef<Path>>(&self, path: P, max_size: u32) -> Result<PreviewImage> {
         let path = path.as_ref();
-        let dyn_img =
-            image::open(path).map_err(|e| EngineError::Decode(e.to_string()))?;
+        let dyn_img = image::open(path).map_err(|e| EngineError::Decode(e.to_string()))?;
 
         let scaled = dyn_img.thumbnail(max_size, max_size).to_rgba8();
         let (w, h) = scaled.dimensions();

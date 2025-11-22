@@ -1,3 +1,4 @@
+pub mod db;
 pub mod schema;
 
 use app_settings::AppSettings;
@@ -38,7 +39,9 @@ impl CatalogPath {
         if normalized
             .extension()
             .and_then(|s| s.to_str())
-            .filter(|ext| ext.eq_ignore_ascii_case("zenithphotocatalog") || ext.eq_ignore_ascii_case("sqlite"))
+            .filter(|ext| {
+                ext.eq_ignore_ascii_case("zenithphotocatalog") || ext.eq_ignore_ascii_case("sqlite")
+            })
             .is_none()
         {
             normalized.set_extension("zenithphotocatalog");
@@ -257,7 +260,10 @@ impl Catalog {
 
     pub fn delete_image(&mut self, id: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM image_keywords WHERE image_id = ?1", params![id])?;
+        tx.execute(
+            "DELETE FROM image_keywords WHERE image_id = ?1",
+            params![id],
+        )?;
         tx.execute("DELETE FROM edits WHERE image_id = ?1", params![id])?;
         tx.execute("DELETE FROM images WHERE id = ?1", params![id])?;
         tx.commit()?;
@@ -340,7 +346,9 @@ impl Catalog {
                 edits.white_balance,
                 edits.temperature,
                 edits.tint,
-                edits.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                edits
+                    .updated_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
             ],
         )?;
         Ok(())
@@ -384,7 +392,8 @@ impl Catalog {
     }
 
     pub fn maintenance(&self) -> Result<()> {
-        self.conn.execute_batch("PRAGMA optimize; ANALYZE; VACUUM;")?;
+        self.conn
+            .execute_batch("PRAGMA optimize; ANALYZE; VACUUM;")?;
         Ok(())
     }
 

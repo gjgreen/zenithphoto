@@ -631,6 +631,7 @@ dependencies = [
 name = "catalog"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "app-settings",
  "chrono",
  "core-types",
