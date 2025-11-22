@@ -242,36 +242,43 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
         let ui_weak = ui_weak.clone();
-        ui.on_update_rating(move |image_id, rating| {
-            if let Err(err) = update_rating(&catalog_state, image_id, rating) {
+        ui.on_rating_changed(move |image_id, rating| {
+            if let Err(err) =
+                apply_rating_change(&catalog_state, &folio_state, &ui_weak, image_id, rating)
+            {
                 eprintln!("Failed to update rating: {err}");
-            } else {
-                refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64);
             }
         });
     }
 
     {
         let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
         let ui_weak = ui_weak.clone();
-        ui.on_update_flag(move |image_id, flag| {
-            if let Err(err) = update_flag(&catalog_state, image_id, flag.as_str()) {
+        ui.on_flag_changed(move |image_id, flag| {
+            if let Err(err) =
+                apply_flag_change(&catalog_state, &folio_state, &ui_weak, image_id, flag.as_str())
+            {
                 eprintln!("Failed to update flag: {err}");
-            } else {
-                refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64);
             }
         });
     }
 
     {
         let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
         let ui_weak = ui_weak.clone();
-        ui.on_update_color_label(move |image_id, label| {
-            if let Err(err) = update_color_label(&catalog_state, image_id, label.as_str()) {
+        ui.on_label_changed(move |image_id, label| {
+            if let Err(err) = apply_color_label_change(
+                &catalog_state,
+                &folio_state,
+                &ui_weak,
+                image_id,
+                label.as_str(),
+            ) {
                 eprintln!("Failed to update color label: {err}");
-            } else {
-                refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64);
             }
         });
     }
@@ -286,7 +293,11 @@ fn main() -> Result<(), slint::PlatformError> {
             {
                 eprintln!("Failed to update keywords: {err}");
             } else {
-                refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64);
+                if let Err(err) =
+                    refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64)
+                {
+                    eprintln!("Failed to refresh metadata after keywords: {err}");
+                }
                 if let Some(ui) = ui_weak.upgrade() {
                     if let Some(id) = folio_state.borrow().selection.first() {
                         ui.set_selected_image_id(*id);
@@ -1694,7 +1705,9 @@ fn handle_thumbnail_selection(
         ui.set_folio_selected_count(selected_len as i32);
         if let Some(first) = selected_first {
             ui.set_selected_image_id(first as i32);
-            refresh_metadata_panel(catalog_state, ui_weak, first as i64);
+            if let Err(err) = refresh_metadata_panel(catalog_state, ui_weak, first as i64) {
+                eprintln!("Failed to refresh metadata panel: {err}");
+            }
         } else {
             ui.set_selected_image_id(-1);
             ui.set_metadata(empty_metadata());
@@ -1703,23 +1716,65 @@ fn handle_thumbnail_selection(
     }
 }
 
+fn refresh_thumbnail(
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    image_id: i64,
+) -> anyhow::Result<()> {
+    let (image, display_thumb) = {
+        let guard = catalog_state.borrow();
+        let session = guard.as_ref().context("No catalog open")?;
+        let meta = session
+            .service
+            .load_metadata(image_id)
+            .with_context(|| format!("Failed to load metadata for image_id={image_id}"))?;
+        let display_thumb = load_or_generate_thumbnail(&session.service, &meta.image)
+            .unwrap_or_else(placeholder_image);
+        (meta.image, display_thumb)
+    };
+
+    let guard = folio_state.borrow_mut();
+    let mut target_idx: Option<usize> = None;
+    for idx in 0..guard.thumbnails.row_count() {
+        if let Some(thumb) = guard.thumbnails.row_data(idx) {
+            if thumb.id == image_id as i32 {
+                target_idx = Some(idx);
+                break;
+            }
+        }
+    }
+
+    if let Some(idx) = target_idx {
+        let is_selected = guard.selection.contains(&(image_id as i32));
+        guard.thumbnails.set_row_data(
+            idx,
+            ThumbnailItem {
+                id: image.id as i32,
+                path: SharedString::from(image.original_path.clone()),
+                display_thumb,
+                rating: image.rating.unwrap_or(0) as i32,
+                flag: SharedString::from(image.flag.unwrap_or_default()),
+                color_label: SharedString::from(image.color_label.unwrap_or_default()),
+                selected: is_selected,
+            },
+        );
+    }
+
+    Ok(())
+}
+
 fn refresh_metadata_panel(
     catalog_state: &CatalogState,
     ui_weak: &slint::Weak<MainWindow>,
     image_id: i64,
-) {
+) -> anyhow::Result<()> {
     let meta = {
         let guard = catalog_state.borrow();
-        let Some(session) = guard.as_ref() else {
-            return;
-        };
-        match session.service.load_metadata(image_id) {
-            Ok(meta) => meta,
-            Err(err) => {
-                eprintln!("Failed to load metadata: {err}");
-                return;
-            }
-        }
+        let session = guard.as_ref().context("No catalog open")?;
+        session
+            .service
+            .load_metadata(image_id)
+            .with_context(|| format!("Failed to load metadata for image_id={image_id}"))?
     };
 
     let image = meta.image;
@@ -1786,42 +1841,61 @@ fn refresh_metadata_panel(
         ui.set_keywords_text(meta.keywords.join(", ").into());
         ui.set_selected_image_id(image_id as i32);
     }
-}
 
-fn update_rating(catalog_state: &CatalogState, image_id: i32, rating: i32) -> anyhow::Result<()> {
-    let mut guard = catalog_state.borrow_mut();
-    let session = guard.as_mut().context("No catalog open")?;
-    session.service.update_rating(image_id as i64, rating)?;
     Ok(())
 }
 
-fn update_flag(catalog_state: &CatalogState, image_id: i32, flag: &str) -> anyhow::Result<()> {
-    let mut guard = catalog_state.borrow_mut();
-    let session = guard.as_mut().context("No catalog open")?;
-    let normalized = if flag.is_empty() {
-        None
-    } else {
-        Some(flag.to_string())
-    };
-    session.service.update_flag(image_id as i64, normalized)?;
-    Ok(())
-}
-
-fn update_color_label(
+fn apply_rating_change(
     catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+    image_id: i32,
+    rating: i32,
+) -> anyhow::Result<()> {
+    {
+        let mut guard = catalog_state.borrow_mut();
+        let session = guard.as_mut().context("No catalog open")?;
+        session.service.update_rating(image_id as i64, rating)?;
+    }
+
+    refresh_thumbnail(catalog_state, folio_state, image_id as i64)?;
+    refresh_metadata_panel(catalog_state, ui_weak, image_id as i64)?;
+    Ok(())
+}
+
+fn apply_flag_change(
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+    image_id: i32,
+    flag: &str,
+) -> anyhow::Result<()> {
+    {
+        let mut guard = catalog_state.borrow_mut();
+        let session = guard.as_mut().context("No catalog open")?;
+        session.service.update_flag(image_id as i64, flag)?;
+    }
+
+    refresh_thumbnail(catalog_state, folio_state, image_id as i64)?;
+    refresh_metadata_panel(catalog_state, ui_weak, image_id as i64)?;
+    Ok(())
+}
+
+fn apply_color_label_change(
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
     image_id: i32,
     label: &str,
 ) -> anyhow::Result<()> {
-    let mut guard = catalog_state.borrow_mut();
-    let session = guard.as_mut().context("No catalog open")?;
-    let normalized = if label.is_empty() {
-        None
-    } else {
-        Some(label.to_string())
-    };
-    session
-        .service
-        .update_color_label(image_id as i64, normalized)?;
+    {
+        let mut guard = catalog_state.borrow_mut();
+        let session = guard.as_mut().context("No catalog open")?;
+        session.service.update_color_label(image_id as i64, label)?;
+    }
+
+    refresh_thumbnail(catalog_state, folio_state, image_id as i64)?;
+    refresh_metadata_panel(catalog_state, ui_weak, image_id as i64)?;
     Ok(())
 }
 

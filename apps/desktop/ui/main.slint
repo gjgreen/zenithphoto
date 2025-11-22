@@ -48,9 +48,9 @@ export component MainWindow inherits Window {
     callback folder-selected(path: string);
     callback thumbnail-selected(image_id: int, range_select: bool, toggle: bool);
     callback thumbnail-activated(image_id: int);
-    callback update-rating(image_id: int, rating: int);
-    callback update-flag(image_id: int, flag: string);
-    callback update-color-label(image_id: int, label: string);
+    callback rating-changed(image_id: int, new_rating: int);
+    callback flag-changed(image_id: int, new_flag: string);
+    callback label-changed(image_id: int, new_label: string);
     callback update-keywords(image_id: int, keywords: string);
     callback filters-changed(search: string, rating: int, flag: string, color_label: string);
     callback open-refine(image_id: int);
@@ -207,9 +207,9 @@ export component MainWindow inherits Window {
                     root.current-tab = 1;
                     root.open-refine(image_id);
                 }
-                update_rating(image_id, rating) => root.update-rating(image_id, rating);
-                update_flag(image_id, flag) => root.update-flag(image_id, flag);
-                update_color_label(image_id, label) => root.update-color-label(image_id, label);
+                rating_changed(image_id, new_rating) => root.rating-changed(image_id, new_rating);
+                flag_changed(image_id, new_flag) => root.flag-changed(image_id, new_flag);
+                label_changed(image_id, new_label) => root.label-changed(image_id, new_label);
                 update_keywords(image_id, keywords) => root.update-keywords(image_id, keywords);
                 filters_changed(search, rating, flag, color_label) => root.filters-changed(search, rating, flag, color_label);
             }

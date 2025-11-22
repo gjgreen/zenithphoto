@@ -167,9 +167,9 @@ export component FolioScreen inherits Rectangle {
     callback folder_selected(path: string);
     callback thumbnail_selected(image_id: int, range_select: bool, toggle: bool);
     callback thumbnail_activated(image_id: int);
-    callback update_rating(image_id: int, rating: int);
-    callback update_flag(image_id: int, flag: string);
-    callback update_color_label(image_id: int, label: string);
+    callback rating_changed(image_id: int, new_rating: int);
+    callback flag_changed(image_id: int, new_flag: string);
+    callback label_changed(image_id: int, new_label: string);
     callback update_keywords(image_id: int, keywords: string);
     callback filters_changed(search: string, rating: int, flag: string, color_label: string);
 
@@ -416,7 +416,9 @@ export component FolioScreen inherits Rectangle {
                                 value: root.metadata.rating;
                                 enabled: root.selected_image_id >= 0;
                                 changed value => {
-                                    root.update_rating(root.selected_image_id, self.value);
+                                    if (root.selected_image_id >= 0 && self.value != root.metadata.rating) {
+                                        root.rating_changed(root.selected_image_id, self.value);
+                                    }
                                 }
                             }
 
@@ -427,7 +429,9 @@ export component FolioScreen inherits Rectangle {
                                 enabled: root.selected_image_id >= 0;
                                 selected(value) => {
                                     let flag_value = self.current-index == 1 ? "picked" : self.current-index == 2 ? "rejected" : "";
-                                    root.update_flag(root.selected_image_id, flag_value);
+                                    if (root.selected_image_id >= 0 && flag_value != root.metadata.flag) {
+                                        root.flag_changed(root.selected_image_id, flag_value);
+                                    }
                                 }
                             }
 
@@ -438,7 +442,9 @@ export component FolioScreen inherits Rectangle {
                                 enabled: root.selected_image_id >= 0;
                                 selected(value) => {
                                     let label = FolioTheme.map_color_label(self.current-index);
-                                    root.update_color_label(root.selected_image_id, label);
+                                    if (root.selected_image_id >= 0 && label != root.metadata.color_label) {
+                                        root.label_changed(root.selected_image_id, label);
+                                    }
                                 }
                             }
 

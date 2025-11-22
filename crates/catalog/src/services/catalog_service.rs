@@ -115,18 +115,30 @@ impl CatalogService {
         Ok(())
     }
 
-    pub fn update_flag(&self, image_id: i64, flag: Option<String>) -> Result<()> {
+    pub fn update_flag(&self, image_id: i64, flag: &str) -> Result<()> {
+        let normalized = flag.trim();
+        let normalized = if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized.to_ascii_lowercase())
+        };
+
         self.db
             .execute(
                 "UPDATE images SET flag = ?1, updated_at = ?2 WHERE id = ?3",
-                params![flag, to_rfc3339(Utc::now()), image_id],
+                params![normalized, to_rfc3339(Utc::now()), image_id],
             )
             .with_context(|| format!("failed to update flag for image_id={image_id}"))?;
         Ok(())
     }
 
-    pub fn update_color_label(&self, image_id: i64, label: Option<String>) -> Result<()> {
-        let normalized = label.map(|s| s.to_ascii_lowercase());
+    pub fn update_color_label(&self, image_id: i64, label: &str) -> Result<()> {
+        let normalized = label.trim();
+        let normalized = if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized.to_ascii_lowercase())
+        };
         self.db
             .execute(
                 "UPDATE images SET color_label = ?1, updated_at = ?2 WHERE id = ?3",
@@ -986,12 +998,8 @@ mod tests {
         let image_id = image.insert(&service.db).unwrap();
 
         service.update_rating(image_id, 4).unwrap();
-        service
-            .update_flag(image_id, Some("picked".into()))
-            .unwrap();
-        service
-            .update_color_label(image_id, Some("Red".into()))
-            .unwrap();
+        service.update_flag(image_id, "picked").unwrap();
+        service.update_color_label(image_id, "Red").unwrap();
         service
             .update_keywords(image_id, &["sky".into(), "mountain".into()])
             .unwrap();
