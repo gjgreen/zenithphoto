@@ -1,0 +1,167 @@
+import { Button, Slider, TextEdit } from "std-widgets.slint";
+
+export struct RefineAdjustments {
+    exposure: float,
+    contrast: float,
+    highlights: float,
+    shadows: float,
+    whites: float,
+    blacks: float,
+}
+
+component Adjustment inherits VerticalLayout {
+    in property <string> label;
+    in property <float> minimum: -100.0;
+    in property <float> maximum: 100.0;
+    in-out property <float> value: 0.0;
+    callback value_changed;
+
+    spacing: 4px;
+
+    Text { text: label; color: #d0d0d0; }
+    Slider {
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value: root.value;
+        changed value => {
+            root.value = self.value;
+            root.value_changed();
+        }
+    }
+}
+
+export component RefineScreen inherits Rectangle {
+    in-out property <int> image_id: -1;
+    in-out property <string> file_path;
+    in-out property <image> preview_image;
+    in-out property <float> exposure: 0.0;
+    in-out property <float> contrast: 0.0;
+    in-out property <float> highlights: 0.0;
+    in-out property <float> shadows: 0.0;
+    in-out property <float> whites: 0.0;
+    in-out property <float> blacks: 0.0;
+
+    callback apply_edits(
+        image_id: int,
+        exposure: float,
+        contrast: float,
+        highlights: float,
+        shadows: float,
+        whites: float,
+        blacks: float
+    );
+    callback back_to_folio();
+
+    background: #0f0f0f;
+
+    HorizontalLayout {
+        spacing: 12px;
+        padding: 12px;
+
+        Rectangle {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+            border-radius: 10px;
+            background: #101010;
+
+            Image {
+                source: root.preview_image;
+                width: parent.width;
+                height: parent.height;
+                image-fit: contain;
+            }
+        }
+
+        Rectangle {
+            width: 320px;
+            border-radius: 10px;
+            background: #151515;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 10px;
+
+                Text {
+                    text: "Refine";
+                    font-weight: 700;
+                    color: #e0e0e0;
+                }
+
+                Text { text: root.file_path; font-size: 10px; wrap: word-wrap; color: #bbbbbb; }
+
+                Adjustment {
+                    label: "Exposure";
+                    minimum: -5.0;
+                    maximum: 5.0;
+                    value <=> root.exposure;
+                    value_changed => {
+                        root.apply_edits(root.image_id, self.value, root.contrast, root.highlights, root.shadows, root.whites, root.blacks);
+                    }
+                }
+
+                Adjustment {
+                    label: "Contrast";
+                    minimum: -100.0;
+                    maximum: 100.0;
+                    value <=> root.contrast;
+                    value_changed => {
+                        root.apply_edits(root.image_id, root.exposure, self.value, root.highlights, root.shadows, root.whites, root.blacks);
+                    }
+                }
+
+                Adjustment {
+                    label: "Highlights";
+                    minimum: -100.0;
+                    maximum: 100.0;
+                    value <=> root.highlights;
+                    value_changed => {
+                        root.apply_edits(root.image_id, root.exposure, root.contrast, self.value, root.shadows, root.whites, root.blacks);
+                    }
+                }
+
+                Adjustment {
+                    label: "Shadows";
+                    minimum: -100.0;
+                    maximum: 100.0;
+                    value <=> root.shadows;
+                    value_changed => {
+                        root.apply_edits(root.image_id, root.exposure, root.contrast, root.highlights, self.value, root.whites, root.blacks);
+                    }
+                }
+
+                Adjustment {
+                    label: "Whites";
+                    minimum: -100.0;
+                    maximum: 100.0;
+                    value <=> root.whites;
+                    value_changed => {
+                        root.apply_edits(root.image_id, root.exposure, root.contrast, root.highlights, root.shadows, self.value, root.blacks);
+                    }
+                }
+
+                Adjustment {
+                    label: "Blacks";
+                    minimum: -100.0;
+                    maximum: 100.0;
+                    value <=> root.blacks;
+                    value_changed => {
+                        root.apply_edits(root.image_id, root.exposure, root.contrast, root.highlights, root.shadows, root.whites, self.value);
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "Back to Folio";
+                        clicked => root.back_to_folio();
+                    }
+                    Button {
+                        text: "Apply";
+                        enabled: root.image_id >= 0;
+                        clicked => root.apply_edits(root.image_id, root.exposure, root.contrast, root.highlights, root.shadows, root.whites, root.blacks);
+                    }
+                }
+            }
+        }
+    }
+}

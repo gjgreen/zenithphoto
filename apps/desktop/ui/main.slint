@@ -1,25 +1,67 @@
 import { CatalogDialog } from "catalog_dialog.slint";
 import { ImportPhotosScreen } from "ImportPhotosScreen.slint";
-import { Button, Slider } from "std-widgets.slint";
+import { MainTabs } from "MainTabs.slint";
+import { FolioScreen, FolderNode, ThumbnailItem, ImageMetadata } from "FolioScreen.slint";
+import { RefineScreen } from "RefineScreen.slint";
 export { CatalogDialog, ImportPhotosScreen }
 
 export component MainWindow inherits Window {
     width: 1400px;
-    height: 800px;
+    height: 900px;
     title: "ZenithPhoto";
 
-    in-out property <image> preview_image;
+    in-out property <int> current-tab: 0; // 0 = Folio, 1 = Refine
     in-out property <string> current-path;
     in-out property <[string]> recent-catalogs;
+    in-out property <[FolderNode]> folder-tree;
+    in-out property <[ThumbnailItem]> thumbnails;
+    in-out property <ImageMetadata> metadata;
+    in-out property <string> filter-search: "";
+    in-out property <int> filter-rating: 0;
+    in-out property <string> filter-flag: "";
+    in-out property <string> filter-color-label: "";
+    in-out property <int> folio-selected-count: 0;
+    in-out property <int> folio-total-count: 0;
+    in-out property <string> folio-size-summary;
+    in-out property <string> keywords-text;
+    in-out property <int> selected-image-id: -1;
+    in-out property <image> refine-preview;
+    in-out property <string> refine-path;
+    in-out property <int> refine-image-id: -1;
+    in-out property <float> refine-exposure: 0.0;
+    in-out property <float> refine-contrast: 0.0;
+    in-out property <float> refine-highlights: 0.0;
+    in-out property <float> refine-shadows: 0.0;
+    in-out property <float> refine-whites: 0.0;
+    in-out property <float> refine-blacks: 0.0;
     in-out property <string> status-text;
 
-    callback open-image-request();
     callback new-catalog-requested();
     callback open-catalog-requested();
     callback open-recent-catalog-requested(path: string);
     callback clear-recent-catalogs-requested();
     callback import-photos-requested();
     callback exit-requested();
+
+    callback folder-selected(path: string);
+    callback thumbnail-selected(image_id: int, range_select: bool, toggle: bool);
+    callback thumbnail-activated(image_id: int);
+    callback update-rating(image_id: int, rating: int);
+    callback update-flag(image_id: int, flag: string);
+    callback update-color-label(image_id: int, label: string);
+    callback update-keywords(image_id: int, keywords: string);
+    callback filters-changed(search: string, rating: int, flag: string, color_label: string);
+    callback open-refine(image_id: int);
+    callback apply-edits(
+        image_id: int,
+        exposure: float,
+        contrast: float,
+        highlights: float,
+        shadows: float,
+        whites: float,
+        blacks: float
+    );
+    callback back-to-folio();
 
     forward-focus: shortcuts;
 
@@ -61,7 +103,7 @@ export component MainWindow inherits Window {
             }
 
             MenuItem {
-                title: "Import Photos…";
+                title: "Import to Folio…";
                 activated => root.import-photos-requested();
             }
 
@@ -92,95 +134,98 @@ export component MainWindow inherits Window {
                 return accept;
             }
 
+            if ((event.text == "1")) {
+                root.current-tab = 0;
+                return accept;
+            }
+
+            if ((event.text == "2")) {
+                root.current-tab = 1;
+                return accept;
+            }
+
             return reject;
         }
 
-        // Basic layout: left panel (stub), center preview, right controls
-        HorizontalLayout {
+        VerticalLayout {
             spacing: 8px;
             padding: 8px;
 
-            // Left panel (future: folders, collections)
-            VerticalLayout {
-                width: 260px;
-                spacing: 8px;
-
-                Text {
-                    text: "Library";
-                    font-weight: 600;
+            HorizontalLayout {
+                spacing: 10px;
+                MainTabs {
+                    current_tab <=> root.current-tab;
+                    open_folio => {
+                        root.current-tab = 0;
+                    }
+                    open_refine => {
+                        root.current-tab = 1;
+                        root.open-refine(root.selected-image-id);
+                    }
                 }
 
-                Button {
-                    text: "Open Image...";
-                    clicked => {
-                        root.open-image-request();
-                    }
+                Rectangle {
+                    horizontal-stretch: 1;
                 }
 
                 Text {
                     text: root.current-path;
-                    wrap: word-wrap;
-                    font-size: 10px;
-                    color: #bbbbbb;
-                }
-                if root.status-text != "": Text {
-                    text: root.status-text;
-                    wrap: word-wrap;
-                    font-size: 10px;
-                    color: #8fb3ff;
+                    color: #9a9a9a;
                 }
             }
 
-            // Center: preview
-            Rectangle {
-                horizontal-stretch: 1;
-                vertical-stretch: 1;
-                background: #202020;
-
-                Image {
-                    source: root.preview_image;
-                    width: parent.width;
-                    height: parent.height;
-                    image-fit: contain;
+            if root.status-text != "": Rectangle {
+                height: 28px;
+                border-radius: 6px;
+                background: #1b2a48;
+                HorizontalLayout {
+                    padding: 8px;
+                    Text { text: root.status-text; color: #c9defb; }
                 }
             }
 
-            // Right: basic develop sliders (just stubbed; wired later)
-            VerticalLayout {
-                width: 260px;
-                spacing: 12px;
+            if root.current-tab == 0: FolioScreen {
+                folder_tree <=> root.folder-tree;
+                thumbnails <=> root.thumbnails;
+                metadata <=> root.metadata;
+                filter_search <=> root.filter-search;
+                filter_rating <=> root.filter-rating;
+                filter_flag <=> root.filter-flag;
+                filter_color_label <=> root.filter-color-label;
+                selected_count <=> root.folio-selected-count;
+                total_count <=> root.folio-total-count;
+                size_summary <=> root.folio-size-summary;
+                keywords_text <=> root.keywords-text;
+                selected_image_id <=> root.selected-image-id;
 
-                Text {
-                    text: "Develop";
-                    font-weight: 600;
+                folder_selected(path) => root.folder-selected(path);
+                thumbnail_selected(image_id, range_select, toggle) => root.thumbnail-selected(image_id, range_select, toggle);
+                thumbnail_activated(image_id) => {
+                    root.selected-image-id = image_id;
+                    root.current-tab = 1;
+                    root.open-refine(image_id);
                 }
+                update_rating(image_id, rating) => root.update-rating(image_id, rating);
+                update_flag(image_id, flag) => root.update-flag(image_id, flag);
+                update_color_label(image_id, label) => root.update-color-label(image_id, label);
+                update_keywords(image_id, keywords) => root.update-keywords(image_id, keywords);
+                filters_changed(search, rating, flag, color_label) => root.filters-changed(search, rating, flag, color_label);
+            }
 
-                Text { text: "Exposure"; }
-                Slider {
-                    minimum: -5;
-                    maximum: 5;
-                    value: 0;
-                }
-
-                Text { text: "Contrast"; }
-                Slider {
-                    minimum: -100;
-                    maximum: 100;
-                    value: 0;
-                }
-
-                Text { text: "Highlights"; }
-                Slider {
-                    minimum: -100;
-                    maximum: 100;
-                    value: 0;
-                }
-
-                Text { text: "Shadows"; }
-                Slider {
-                    minimum: -100;
-                    maximum: 100;
-                    value: 0;
+            if root.current-tab == 1: RefineScreen {
+                image_id <=> root.refine-image-id;
+                file_path <=> root.refine-path;
+                preview_image <=> root.refine-preview;
+                exposure <=> root.refine-exposure;
+                contrast <=> root.refine-contrast;
+                highlights <=> root.refine-highlights;
+                shadows <=> root.refine-shadows;
+                whites <=> root.refine-whites;
+                blacks <=> root.refine-blacks;
+                apply_edits(image_id, exposure, contrast, highlights, shadows, whites, blacks) => root.apply-edits(image_id, exposure, contrast, highlights, shadows, whites, blacks);
+                back_to_folio => {
+                    root.current-tab = 0;
+                    root.back-to-folio();
                 }
             }
         }

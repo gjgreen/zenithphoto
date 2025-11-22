@@ -1,0 +1,419 @@
+import { Button, ComboBox, ScrollView, SpinBox, TextEdit } from "std-widgets.slint";
+
+export struct FolderNode {
+    name: string,
+    full_path: string,
+    depth: int,
+}
+
+export struct ThumbnailItem {
+    id: int,
+    path: string,
+    display_thumb: image,
+    selected: bool,
+    rating: int,
+    flag: string,
+    color_label: string,
+}
+
+export struct ImageMetadata {
+    file_path: string,
+    captured_at: string,
+    camera: string,
+    lens: string,
+    focal_length: string,
+    aperture: string,
+    shutter_speed: string,
+    iso: string,
+    gps_lat: string,
+    gps_lon: string,
+    rating: int,
+    flag: string,
+    color_label: string,
+    keywords: [string],
+}
+
+export struct FolioFilters {
+    search: string,
+    rating: int,
+    flag: string,
+    color_label: string,
+}
+
+export global FolioTheme {
+    public pure function label_color(label: string) -> brush {
+        if (label == "Red" || label == "red") { return #ef4444; }
+        if (label == "Yellow" || label == "yellow") { return #f59e0b; }
+        if (label == "Green" || label == "green") { return #22c55e; }
+        if (label == "Blue" || label == "blue") { return #3b82f6; }
+        if (label == "Purple" || label == "purple") { return #a855f7; }
+        return #666666;
+    }
+
+    public pure function color_index(label: string) -> int {
+        if (label == "Red" || label == "red") { return 1; }
+        if (label == "Yellow" || label == "yellow") { return 2; }
+        if (label == "Green" || label == "green") { return 3; }
+        if (label == "Blue" || label == "blue") { return 4; }
+        if (label == "Purple" || label == "purple") { return 5; }
+        return 0;
+    }
+
+    public pure function map_color_label(idx: int) -> string {
+        if (idx == 1) { return "red"; }
+        if (idx == 2) { return "yellow"; }
+        if (idx == 3) { return "green"; }
+        if (idx == 4) { return "blue"; }
+        if (idx == 5) { return "purple"; }
+        return "";
+    }
+}
+
+component ThumbnailCard inherits Rectangle {
+    in property <int> item-id;
+    in property <string> path;
+    in property <image> thumbnail;
+    in property <bool> selected: false;
+    in property <int> rating: 0;
+    in property <string> flag: "";
+    in property <string> color-label: "";
+    callback clicked(range_select: bool, toggle: bool);
+    callback activated;
+
+    preferred-height: 200px;
+    border-radius: 6px;
+    background: selected ? #2040a0aa : #1c1c1c;
+    border-width: selected ? 1px : 0px;
+    border-color: #3b82f6;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        Rectangle {
+            background: #0a0a0a;
+            border-radius: 4px;
+            height: 140px;
+            Image {
+                source: thumbnail;
+                width: parent.width;
+                height: parent.height;
+                image-fit: cover;
+            }
+        }
+
+        Text {
+            text: path;
+            font-size: 10px;
+            wrap: word-wrap;
+            color: #c0c0c0;
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            Text { text: rating > 0 ? ("★" + rating) : "Unrated"; font-size: 10px; color: #f1c40f; }
+            if flag != "": Text { text: flag; font-size: 10px; color: #76ff7a; }
+            if color-label != "": Rectangle {
+                width: 12px; height: 12px; border-radius: 2px;
+                background: FolioTheme.label_color(color-label);
+            }
+        }
+    }
+
+    TouchArea {
+        double-clicked => activated();
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.up) {
+                let toggle = event.modifiers.control || event.modifiers.meta;
+                clicked(event.modifiers.shift, toggle);
+            }
+        }
+    }
+}
+
+component MetaRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+
+    spacing: 6px;
+    Text { text: label + ":"; color: #9a9a9a; width: 90px; }
+    Text { text: value; wrap: word-wrap; color: #d0d0d0; horizontal-stretch: 1; }
+}
+
+export component FolioScreen inherits Rectangle {
+    in-out property <[FolderNode]> folder_tree;
+    in-out property <[ThumbnailItem]> thumbnails;
+    in-out property <ImageMetadata> metadata;
+    in-out property <string> filter_search;
+    in-out property <int> filter_rating: 0;
+    in-out property <string> filter_flag;
+    in-out property <string> filter_color_label;
+    in-out property <int> selected_count: 0;
+    in-out property <int> total_count: 0;
+    in-out property <string> size_summary;
+    in-out property <string> keywords_text;
+    in-out property <int> selected_image_id: -1;
+
+    callback folder_selected(path: string);
+    callback thumbnail_selected(image_id: int, range_select: bool, toggle: bool);
+    callback thumbnail_activated(image_id: int);
+    callback update_rating(image_id: int, rating: int);
+    callback update_flag(image_id: int, flag: string);
+    callback update_color_label(image_id: int, label: string);
+    callback update_keywords(image_id: int, keywords: string);
+    callback filters_changed(search: string, rating: int, flag: string, color_label: string);
+
+    background: #0f0f0f;
+
+    HorizontalLayout {
+        spacing: 10px;
+        padding: 10px;
+
+        // Folder tree
+        Rectangle {
+            width: 260px;
+            border-radius: 8px;
+            background: #151515;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+                Text { text: "Folio"; font-weight: 700; color: #e0e0e0; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        VerticalLayout {
+                            spacing: 4px;
+                            for node in root.folder_tree: Rectangle {
+                                height: 28px;
+                                border-radius: 4px;
+                                background: #181818;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    padding: 6px;
+
+                                    Rectangle {
+                                        width: node.depth * 12px;
+                                        height: 1px;
+                                        opacity: 0;
+                                    }
+
+                                    Text {
+                                        text: node.name;
+                                        color: #d0d0d0;
+                                    }
+                                }
+
+                                TouchArea {
+                                    clicked => root.folder_selected(node.full_path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Thumbnail grid and filters
+        Rectangle {
+            background: #121212;
+            border-radius: 8px;
+            horizontal-stretch: 1;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 10px;
+
+                // Filters
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    TextEdit {
+                        width: 220px;
+                        height: 26px;
+                        text: root.filter_search;
+                        edited => {
+                            root.filter_search = self.text;
+                            root.filters_changed(
+                                root.filter_search,
+                                root.filter_rating,
+                                root.filter_flag,
+                                root.filter_color_label,
+                            );
+                        }
+                    }
+
+                    ComboBox {
+                        width: 120px;
+                        model: ["Any rating", "1+", "2+", "3+", "4+", "5"];
+                        current-index: root.filter_rating;
+                        selected(value) => {
+                            root.filter_rating = self.current-index;
+                            root.filters_changed(
+                                root.filter_search,
+                                root.filter_rating,
+                                root.filter_flag,
+                                root.filter_color_label,
+                            );
+                        }
+                    }
+
+                    ComboBox {
+                        width: 120px;
+                        model: ["Any flag", "Picked", "Rejected"];
+                        current-index: root.filter_flag == "rejected" ? 2 : root.filter_flag == "picked" ? 1 : 0;
+                        selected(value) => {
+                            let flag_value = self.current-index == 1 ? "picked" : self.current-index == 2 ? "rejected" : "";
+                            root.filter_flag = flag_value;
+                            root.filters_changed(
+                                root.filter_search,
+                                root.filter_rating,
+                                root.filter_flag,
+                                root.filter_color_label,
+                            );
+                        }
+                    }
+
+                    ComboBox {
+                        width: 140px;
+                        model: ["Any label", "Red", "Yellow", "Green", "Blue", "Purple"];
+                        current-index: FolioTheme.color_index(root.filter_color_label);
+                        selected(value) => {
+                            root.filter_color_label = FolioTheme.map_color_label(self.current-index);
+                            root.filters_changed(
+                                root.filter_search,
+                                root.filter_rating,
+                                root.filter_flag,
+                                root.filter_color_label,
+                            );
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        for thumb[idx] in root.thumbnails: ThumbnailCard {
+                            item-id: thumb.id;
+                            path: thumb.path;
+                            thumbnail: thumb.display_thumb;
+                            selected: thumb.selected;
+                            rating: thumb.rating;
+                            flag: thumb.flag;
+                            color-label: thumb.color_label;
+
+                            clicked(range-select, toggle) => {
+                                root.thumbnail_selected(thumb.id, range-select, toggle);
+                            }
+                            activated => root.thumbnail_activated(thumb.id);
+                        }
+                    }
+                }
+
+                // Status bar
+                Rectangle {
+                    height: 32px;
+                    border-radius: 6px;
+                    background: #151515;
+
+                    HorizontalLayout {
+                        padding: 8px;
+                        spacing: 12px;
+
+                        Text { text: root.total_count + " images"; color: #c0c0c0; }
+                        Text { text: root.selected_count + " selected"; color: #c0c0c0; }
+                        Text { text: root.size_summary; color: #a0a0a0; }
+                    }
+                }
+            }
+        }
+
+        // Metadata panel
+        Rectangle {
+            width: 320px;
+            border-radius: 8px;
+            background: #151515;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                Text { text: "Metadata"; font-weight: 700; color: #e0e0e0; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        VerticalLayout {
+                            spacing: 6px;
+
+                            MetaRow { label: "Path"; value: root.metadata.file_path; }
+                            MetaRow { label: "Captured"; value: root.metadata.captured_at; }
+                            MetaRow { label: "Camera"; value: root.metadata.camera; }
+                            MetaRow { label: "Lens"; value: root.metadata.lens; }
+                            MetaRow { label: "Focal"; value: root.metadata.focal_length; }
+                            MetaRow { label: "Aperture"; value: root.metadata.aperture; }
+                            MetaRow { label: "Shutter"; value: root.metadata.shutter_speed; }
+                            MetaRow { label: "ISO"; value: root.metadata.iso; }
+                            MetaRow { label: "GPS"; value: root.metadata.gps_lat + ", " + root.metadata.gps_lon; }
+
+                            Rectangle { height: 8px; }
+
+                            Text { text: "Rating"; color: #d0d0d0; font-weight: 600; }
+                            SpinBox {
+                                minimum: 0;
+                                maximum: 5;
+                                value: root.metadata.rating;
+                                enabled: root.selected_image_id >= 0;
+                                changed value => {
+                                    root.update_rating(root.selected_image_id, self.value);
+                                }
+                            }
+
+                            Text { text: "Flag"; color: #d0d0d0; font-weight: 600; }
+                            ComboBox {
+                                model: ["None", "Picked", "Rejected"];
+                                current-index: root.metadata.flag == "picked" ? 1 : root.metadata.flag == "rejected" ? 2 : 0;
+                                enabled: root.selected_image_id >= 0;
+                                selected(value) => {
+                                    let flag_value = self.current-index == 1 ? "picked" : self.current-index == 2 ? "rejected" : "";
+                                    root.update_flag(root.selected_image_id, flag_value);
+                                }
+                            }
+
+                            Text { text: "Color Label"; color: #d0d0d0; font-weight: 600; }
+                            ComboBox {
+                                model: ["None", "Red", "Yellow", "Green", "Blue", "Purple"];
+                                current-index: FolioTheme.color_index(root.metadata.color_label);
+                                enabled: root.selected_image_id >= 0;
+                                selected(value) => {
+                                    let label = FolioTheme.map_color_label(self.current-index);
+                                    root.update_color_label(root.selected_image_id, label);
+                                }
+                            }
+
+                            Text { text: "Keywords"; color: #d0d0d0; font-weight: 600; }
+                            TextEdit {
+                                text <=> root.keywords_text;
+                                wrap: word-wrap;
+                                vertical-stretch: 1;
+                                enabled: root.selected_image_id >= 0;
+                            }
+                            Button {
+                                text: "Update Keywords";
+                                enabled: root.selected_image_id >= 0;
+                                clicked => root.update_keywords(root.selected_image_id, root.keywords_text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

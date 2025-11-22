@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,13 @@ use crate::db::{
 /// Alias the low-level edit record for service consumers.
 pub type Edits = crate::db::Edit;
 
+/// Aggregated metadata and keywords for a single image.
+#[derive(Debug, Clone)]
+pub struct ImageDetails {
+    pub image: Image,
+    pub keywords: Vec<String>,
+}
+
 /// High-level catalog operations that sit above the raw ORM bindings.
 pub struct CatalogService {
     pub db: CatalogDb,
@@ -27,6 +34,105 @@ pub struct CatalogService {
 impl CatalogService {
     pub fn new(db: CatalogDb) -> Self {
         Self { db }
+    }
+
+    pub fn list_folders(&self) -> Result<Vec<Folder>> {
+        Folder::load_all(&self.db).context("failed to list folders")
+    }
+
+    pub fn list_images_in_folder(&self, folder_path: &Path) -> Result<Vec<Image>> {
+        let normalized = folder_path.to_string_lossy().to_string();
+        let Some(folder) = Folder::find_by_path(&self.db, &normalized)? else {
+            return Ok(Vec::new());
+        };
+        Image::find_by_folder(&self.db, folder.id)
+            .with_context(|| format!("failed to list images for folder {}", folder_path.display()))
+    }
+
+    pub fn load_thumbnail(&self, image_id: i64) -> Result<Option<Thumbnail>> {
+        query_optional(
+            &self.db,
+            "SELECT image_id, thumb_256, thumb_1024, updated_at FROM thumbnails WHERE image_id = ?1",
+            params![image_id],
+            Thumbnail::from_row,
+        )
+        .context("failed to load thumbnail")
+    }
+
+    pub fn load_metadata(&self, image_id: i64) -> Result<ImageDetails> {
+        let image = Image::load(&self.db, image_id)
+            .with_context(|| format!("failed to load image id={image_id}"))?;
+        let keywords = ImageKeyword::list_keywords_for_image(&self.db, image_id)
+            .context("failed to load keywords for image")?
+            .into_iter()
+            .map(|k| k.keyword)
+            .collect();
+
+        Ok(ImageDetails { image, keywords })
+    }
+
+    pub fn update_keywords(&self, image_id: i64, keywords: &[String]) -> Result<()> {
+        let desired: HashSet<String> = keywords
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let existing_keywords = ImageKeyword::list_keywords_for_image(&self.db, image_id)?;
+        let existing: HashSet<String> = existing_keywords
+            .iter()
+            .map(|k| k.keyword.clone())
+            .collect();
+
+        for kw in desired.iter().filter(|kw| !existing.contains(*kw)) {
+            let keyword = Keyword::get_or_create(&self.db, kw)
+                .with_context(|| format!("failed to upsert keyword {kw}"))?;
+            ImageKeyword {
+                image_id,
+                keyword_id: keyword.id,
+                assigned_at: Utc::now(),
+            }
+            .insert(&self.db)?;
+        }
+
+        for kw in existing_keywords {
+            if !desired.contains(&kw.keyword) {
+                ImageKeyword::delete(&self.db, image_id, kw.id)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn update_rating(&self, image_id: i64, rating: i32) -> Result<()> {
+        self.db
+            .execute(
+                "UPDATE images SET rating = ?1, updated_at = ?2 WHERE id = ?3",
+                params![rating, to_rfc3339(Utc::now()), image_id],
+            )
+            .with_context(|| format!("failed to update rating for image_id={image_id}"))?;
+        Ok(())
+    }
+
+    pub fn update_flag(&self, image_id: i64, flag: Option<String>) -> Result<()> {
+        self.db
+            .execute(
+                "UPDATE images SET flag = ?1, updated_at = ?2 WHERE id = ?3",
+                params![flag, to_rfc3339(Utc::now()), image_id],
+            )
+            .with_context(|| format!("failed to update flag for image_id={image_id}"))?;
+        Ok(())
+    }
+
+    pub fn update_color_label(&self, image_id: i64, label: Option<String>) -> Result<()> {
+        let normalized = label.map(|s| s.to_ascii_lowercase());
+        self.db
+            .execute(
+                "UPDATE images SET color_label = ?1, updated_at = ?2 WHERE id = ?3",
+                params![normalized, to_rfc3339(Utc::now()), image_id],
+            )
+            .with_context(|| format!("failed to update color label for image_id={image_id}"))?;
+        Ok(())
     }
 
     pub fn import_image(&self, path: &Path) -> Result<Image> {
@@ -763,5 +869,122 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!((updated_exposure - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn list_folders_and_images() {
+        let service = service_with_fresh_db();
+        let now = Utc::now();
+
+        let folder = Folder {
+            id: 0,
+            path: "/list".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        let folder_id = folder.insert(&service.db).unwrap();
+
+        let image = Image {
+            id: 0,
+            folder_id,
+            filename: "img.jpg".into(),
+            original_path: "/list/img.jpg".into(),
+            sidecar_path: None,
+            sidecar_hash: None,
+            filesize: Some(10),
+            file_hash: None,
+            file_modified_at: None,
+            imported_at: now,
+            captured_at: None,
+            camera_make: None,
+            camera_model: None,
+            lens_model: None,
+            focal_length: None,
+            aperture: None,
+            shutter_speed: None,
+            iso: None,
+            orientation: None,
+            gps_latitude: None,
+            gps_longitude: None,
+            gps_altitude: None,
+            rating: None,
+            flag: None,
+            color_label: None,
+            metadata_json: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let image_id = image.insert(&service.db).unwrap();
+
+        let folders = service.list_folders().unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].path, "/list");
+
+        let images = service.list_images_in_folder(Path::new("/list")).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].id, image_id);
+    }
+
+    #[test]
+    fn update_metadata_helpers() {
+        let service = service_with_fresh_db();
+        let now = Utc::now();
+
+        let folder = Folder {
+            id: 0,
+            path: "/helpers".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        let folder_id = folder.insert(&service.db).unwrap();
+        let image = Image {
+            id: 0,
+            folder_id,
+            filename: "img.dng".into(),
+            original_path: "/helpers/img.dng".into(),
+            sidecar_path: None,
+            sidecar_hash: None,
+            filesize: None,
+            file_hash: None,
+            file_modified_at: None,
+            imported_at: now,
+            captured_at: None,
+            camera_make: None,
+            camera_model: None,
+            lens_model: None,
+            focal_length: None,
+            aperture: None,
+            shutter_speed: None,
+            iso: None,
+            orientation: None,
+            gps_latitude: None,
+            gps_longitude: None,
+            gps_altitude: None,
+            rating: None,
+            flag: None,
+            color_label: None,
+            metadata_json: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let image_id = image.insert(&service.db).unwrap();
+
+        service.update_rating(image_id, 4).unwrap();
+        service
+            .update_flag(image_id, Some("picked".into()))
+            .unwrap();
+        service
+            .update_color_label(image_id, Some("Red".into()))
+            .unwrap();
+        service
+            .update_keywords(image_id, &["sky".into(), "mountain".into()])
+            .unwrap();
+
+        let details = service.load_metadata(image_id).unwrap();
+        assert_eq!(details.image.rating, Some(4));
+        assert_eq!(details.image.flag.as_deref(), Some("picked"));
+        assert_eq!(details.image.color_label.as_deref(), Some("red"));
+        assert!(details.keywords.contains(&"sky".into()));
+        assert!(details.keywords.contains(&"mountain".into()));
     }
 }

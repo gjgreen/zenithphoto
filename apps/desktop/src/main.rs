@@ -4,8 +4,8 @@ mod import;
 slint::include_modules!(); // from build.rs compiled ui/main.slint and catalog_dialog.slint
 
 use anyhow::{anyhow, Context};
-use catalog::db::CatalogDb;
-use catalog::services::CatalogService;
+use catalog::db::{CatalogDb, Folder, Image as CatalogImage, Thumbnail};
+use catalog::services::{CatalogService, Edits};
 use catalog::{Catalog, CatalogPath};
 use config::ConfigStore;
 use engine::ImageEngine;
@@ -16,6 +16,7 @@ use import::{
 use rfd::{AsyncFileDialog, FileDialog};
 use slint::{Model, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -44,6 +45,65 @@ impl CatalogSession {
 }
 
 type CatalogState = Rc<RefCell<Option<CatalogSession>>>;
+
+#[derive(Clone)]
+struct FilterState {
+    search: String,
+    rating: i32,
+    flag: String,
+    color_label: String,
+}
+
+struct FolioState {
+    folder_tree: Rc<VecModel<FolderNode>>,
+    thumbnails: Rc<VecModel<ThumbnailItem>>,
+    selection: Vec<i32>,
+    selection_anchor: Option<usize>,
+    filters: FilterState,
+    current_folder: Option<String>,
+}
+
+impl FolioState {
+    fn new() -> Self {
+        Self {
+            folder_tree: Rc::new(VecModel::default()),
+            thumbnails: Rc::new(VecModel::default()),
+            selection: Vec::new(),
+            selection_anchor: None,
+            filters: FilterState {
+                search: String::new(),
+                rating: 0,
+                flag: String::new(),
+                color_label: String::new(),
+            },
+            current_folder: None,
+        }
+    }
+
+    fn reset_selection(&mut self) {
+        self.selection.clear();
+        self.selection_anchor = None;
+    }
+}
+
+fn empty_metadata() -> ImageMetadata {
+    ImageMetadata {
+        file_path: "".into(),
+        captured_at: "".into(),
+        camera: "".into(),
+        lens: "".into(),
+        focal_length: "".into(),
+        aperture: "".into(),
+        shutter_speed: "".into(),
+        iso: "".into(),
+        gps_lat: "".into(),
+        gps_lon: "".into(),
+        rating: 0,
+        flag: "".into(),
+        color_label: "".into(),
+        keywords: Rc::<VecModel<SharedString>>::default().into(),
+    }
+}
 
 fn main() -> Result<(), slint::PlatformError> {
     let config_store = ConfigStore::load().unwrap_or_else(|err| {
@@ -99,6 +159,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let ui = MainWindow::new()?;
     ui.set_current_path(catalog_path.to_string_lossy().to_string().into());
+    ui.set_status_text("".into());
 
     let ui_weak = ui.as_weak();
     let recent_model = Rc::new(VecModel::<SharedString>::default());
@@ -111,77 +172,196 @@ fn main() -> Result<(), slint::PlatformError> {
     ))));
     let engine = Arc::new(ImageEngine::new());
     let active_import_ui: Rc<RefCell<Option<ImportPhotosScreen>>> = Rc::new(RefCell::new(None));
+    let folio_state = Rc::new(RefCell::new(FolioState::new()));
 
     {
-        let catalog_for_ui = catalog_state.clone();
-        let engine = engine.clone();
+        let folio_guard = folio_state.borrow();
+        ui.set_folder_tree(folio_guard.folder_tree.clone().into());
+        ui.set_thumbnails(folio_guard.thumbnails.clone().into());
+        ui.set_filter_search(folio_guard.filters.search.clone().into());
+        ui.set_filter_rating(folio_guard.filters.rating);
+        ui.set_filter_flag(folio_guard.filters.flag.clone().into());
+        ui.set_filter_color_label(folio_guard.filters.color_label.clone().into());
+    }
+    ui.set_metadata(empty_metadata());
+    ui.set_keywords_text("".into());
+    ui.set_folio_size_summary("".into());
+    ui.set_selected_image_id(-1);
+    ui.set_folio_selected_count(0);
+    ui.set_folio_total_count(0);
+    ui.set_refine_preview(placeholder_image());
+    ui.set_refine_path("".into());
+    ui.set_refine_image_id(-1);
+    ui.set_refine_exposure(0.0);
+    ui.set_refine_contrast(0.0);
+    ui.set_refine_highlights(0.0);
+    ui.set_refine_shadows(0.0);
+    ui.set_refine_whites(0.0);
+    ui.set_refine_blacks(0.0);
+
+    refresh_folio_tree(&ui_weak, &catalog_state, &folio_state);
+
+    {
         let ui_weak = ui_weak.clone();
-        ui.on_open_image_request(move || {
-            if ui_weak.upgrade().is_none() {
-                return;
+        let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
+        ui.on_folder_selected(move |path| {
+            let path_buf = PathBuf::from(path.as_str());
+            {
+                folio_state.borrow_mut().current_folder = Some(path.to_string());
             }
+            load_folder_thumbnails(&catalog_state, &folio_state, &ui_weak, &path_buf);
+        });
+    }
 
-            let path_opt = FileDialog::new()
-                .add_filter(
-                    "Images",
-                    &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"],
-                )
-                .pick_file();
+    {
+        let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
+        let ui_weak = ui_weak.clone();
+        ui.on_thumbnail_selected(move |image_id, range_select, toggle| {
+            handle_thumbnail_selection(
+                image_id,
+                range_select,
+                toggle,
+                &catalog_state,
+                &folio_state,
+                &ui_weak,
+            );
+        });
+    }
 
-            if let Some(path) = path_opt {
-                {
-                    let catalog_guard = catalog_for_ui.borrow();
-                    if let Some(session) = catalog_guard.as_ref() {
-                        match session.service.import_image(&path) {
-                            Ok(image) => {
-                                if let Err(err) =
-                                    session.service.generate_thumbnail(image.id, &path)
-                                {
-                                    eprintln!("Failed to generate thumbnail for preview: {err}");
-                                }
-                            }
-                            Err(err) => {
-                                eprintln!("Failed to add image to catalog: {err}");
-                            }
-                        }
-                    } else {
-                        return;
+    {
+        let catalog_state = catalog_state.clone();
+        let ui_weak = ui_weak.clone();
+        let engine = engine.clone();
+        ui.on_thumbnail_activated(move |image_id| {
+            open_refine_screen(&catalog_state, &ui_weak, &engine, image_id);
+        });
+    }
+
+    {
+        let catalog_state = catalog_state.clone();
+        let ui_weak = ui_weak.clone();
+        ui.on_update_rating(move |image_id, rating| {
+            if let Err(err) = update_rating(&catalog_state, image_id, rating) {
+                eprintln!("Failed to update rating: {err}");
+            } else {
+                refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64);
+            }
+        });
+    }
+
+    {
+        let catalog_state = catalog_state.clone();
+        let ui_weak = ui_weak.clone();
+        ui.on_update_flag(move |image_id, flag| {
+            if let Err(err) = update_flag(&catalog_state, image_id, flag.as_str()) {
+                eprintln!("Failed to update flag: {err}");
+            } else {
+                refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64);
+            }
+        });
+    }
+
+    {
+        let catalog_state = catalog_state.clone();
+        let ui_weak = ui_weak.clone();
+        ui.on_update_color_label(move |image_id, label| {
+            if let Err(err) = update_color_label(&catalog_state, image_id, label.as_str()) {
+                eprintln!("Failed to update color label: {err}");
+            } else {
+                refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64);
+            }
+        });
+    }
+
+    {
+        let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
+        let ui_weak = ui_weak.clone();
+        ui.on_update_keywords(move |image_id, keywords| {
+            if let Err(err) =
+                update_keywords(&catalog_state, image_id, parse_keywords(keywords.as_str()))
+            {
+                eprintln!("Failed to update keywords: {err}");
+            } else {
+                refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64);
+                if let Some(ui) = ui_weak.upgrade() {
+                    if let Some(id) = folio_state.borrow().selection.first() {
+                        ui.set_selected_image_id(*id);
                     }
                 }
-
-                let path_str = path.to_string_lossy().to_string();
-                let engine = engine.clone();
-                let ui_weak_inner = ui_weak.clone();
-
-                std::thread::spawn(move || match engine.open_preview(&path, 1024) {
-                    Ok(preview) => {
-                        let width = preview.width;
-                        let height = preview.height;
-                        let data = preview.data;
-                        slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = ui_weak_inner.upgrade() {
-                                let buf = preview_to_pixel_buffer(width, height, data);
-                                ui.set_preview_image(slint::Image::from_rgba8(buf));
-                                ui.set_current_path(path_str.clone().into());
-                            }
-                        })
-                        .ok();
-                    }
-                    Err(err) => {
-                        eprintln!("Failed to open preview: {err}");
-                    }
-                });
             }
         });
     }
 
     {
+        let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
+        let ui_weak = ui_weak.clone();
+        ui.on_filters_changed(move |search, rating, flag, color_label| {
+            folio_state.borrow_mut().filters = FilterState {
+                search: search.to_string(),
+                rating,
+                flag: flag.to_string(),
+                color_label: color_label.to_string(),
+            };
+            if let Some(folder) = folio_state.borrow().current_folder.clone() {
+                load_folder_thumbnails(
+                    &catalog_state,
+                    &folio_state,
+                    &ui_weak,
+                    &PathBuf::from(folder),
+                );
+            }
+        });
+    }
+
+    {
+        let catalog_state = catalog_state.clone();
+        let ui_weak = ui_weak.clone();
+        let engine = engine.clone();
+        ui.on_open_refine(move |image_id| {
+            open_refine_screen(&catalog_state, &ui_weak, &engine, image_id);
+        });
+    }
+
+    {
+        let catalog_state = catalog_state.clone();
+        ui.on_apply_edits(
+            move |image_id, exposure, contrast, highlights, shadows, whites, blacks| {
+                if let Err(err) = apply_refine_edits(
+                    &catalog_state,
+                    image_id,
+                    exposure,
+                    contrast,
+                    highlights,
+                    shadows,
+                    whites,
+                    blacks,
+                ) {
+                    eprintln!("Failed to save edits: {err}");
+                }
+            },
+        );
+    }
+
+    ui.on_back_to_folio(move || {});
+
+    {
         let ui_weak = ui_weak.clone();
         let catalog_state = catalog_state.clone();
         let config_store = config_store.clone();
         let recent_model = recent_model.clone();
+        let folio_state = folio_state.clone();
         ui.on_open_catalog_requested(move || {
-            spawn_open_catalog_dialog(&ui_weak, &catalog_state, &config_store, &recent_model);
+            spawn_open_catalog_dialog(
+                &ui_weak,
+                &catalog_state,
+                &config_store,
+                &recent_model,
+                &folio_state,
+            );
         });
     }
 
@@ -190,8 +370,15 @@ fn main() -> Result<(), slint::PlatformError> {
         let catalog_state = catalog_state.clone();
         let config_store = config_store.clone();
         let recent_model = recent_model.clone();
+        let folio_state = folio_state.clone();
         ui.on_new_catalog_requested(move || {
-            spawn_new_catalog_dialog(&ui_weak, &catalog_state, &config_store, &recent_model);
+            spawn_new_catalog_dialog(
+                &ui_weak,
+                &catalog_state,
+                &config_store,
+                &recent_model,
+                &folio_state,
+            );
         });
     }
 
@@ -200,6 +387,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let catalog_state = catalog_state.clone();
         let config_store = config_store.clone();
         let recent_model = recent_model.clone();
+        let folio_state = folio_state.clone();
         ui.on_open_recent_catalog_requested(move |path| {
             let path_buf = PathBuf::from(path.as_str());
             if let Err(err) = load_catalog_from_path(
@@ -208,6 +396,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 &catalog_state,
                 &config_store,
                 &recent_model,
+                &folio_state,
             ) {
                 eprintln!("{err}");
             }
@@ -244,11 +433,13 @@ fn spawn_open_catalog_dialog(
     catalog_state: &CatalogState,
     config_store: &ConfigStore,
     recent_model: &Rc<VecModel<SharedString>>,
+    folio_state: &Rc<RefCell<FolioState>>,
 ) {
     let ui_weak = ui_weak.clone();
     let catalog_state = catalog_state.clone();
     let config_store = config_store.clone();
     let recent_model = recent_model.clone();
+    let folio_state = folio_state.clone();
 
     let _ = slint::spawn_local(async move {
         if let Some(handle) = AsyncFileDialog::new()
@@ -258,9 +449,14 @@ fn spawn_open_catalog_dialog(
             .await
         {
             let path = handle.path().to_path_buf();
-            if let Err(err) =
-                load_catalog_from_path(path, &ui_weak, &catalog_state, &config_store, &recent_model)
-            {
+            if let Err(err) = load_catalog_from_path(
+                path,
+                &ui_weak,
+                &catalog_state,
+                &config_store,
+                &recent_model,
+                &folio_state,
+            ) {
                 eprintln!("{err}");
             }
         }
@@ -272,11 +468,13 @@ fn spawn_new_catalog_dialog(
     catalog_state: &CatalogState,
     config_store: &ConfigStore,
     recent_model: &Rc<VecModel<SharedString>>,
+    folio_state: &Rc<RefCell<FolioState>>,
 ) {
     let ui_weak = ui_weak.clone();
     let catalog_state = catalog_state.clone();
     let config_store = config_store.clone();
     let recent_model = recent_model.clone();
+    let folio_state = folio_state.clone();
 
     let _ = slint::spawn_local(async move {
         if let Some(handle) = AsyncFileDialog::new()
@@ -296,6 +494,7 @@ fn spawn_new_catalog_dialog(
                         &catalog_state,
                         &config_store,
                         &recent_model,
+                        &folio_state,
                     );
                 }
                 Err(err) => eprintln!("Failed to create catalog: {err}"),
@@ -310,6 +509,7 @@ fn load_catalog_from_path(
     catalog_state: &CatalogState,
     config_store: &ConfigStore,
     recent_model: &Rc<VecModel<SharedString>>,
+    folio_state: &Rc<RefCell<FolioState>>,
 ) -> Result<(), String> {
     let normalized_path = CatalogPath::new(&selected_path).into_path();
     if !normalized_path.exists() {
@@ -328,6 +528,7 @@ fn load_catalog_from_path(
         catalog_state,
         config_store,
         recent_model,
+        folio_state,
     );
     Ok(())
 }
@@ -339,6 +540,7 @@ fn apply_loaded_catalog(
     catalog_state: &CatalogState,
     config_store: &ConfigStore,
     recent_model: &Rc<VecModel<SharedString>>,
+    folio_state: &Rc<RefCell<FolioState>>,
 ) {
     *catalog_state.borrow_mut() = Some(CatalogSession::new(catalog, path.clone()));
 
@@ -361,6 +563,8 @@ fn apply_loaded_catalog(
         }
     })
     .ok();
+
+    refresh_folio_tree(ui_weak, catalog_state, folio_state);
 }
 
 struct ImportViewState {
@@ -587,13 +791,7 @@ fn begin_import(
                 .unwrap_or(stage_label(&progress.stage));
             ui.set_progress(pct);
             ui.set_status_text(
-                format!(
-                    "{} ({}/{})",
-                    label,
-                    progress.completed,
-                    progress.total
-                )
-                .into(),
+                format!("{} ({}/{})", label, progress.completed, progress.total).into(),
             );
         }
     });
@@ -940,4 +1138,538 @@ fn prompt_for_catalog_dialog(
 
     let result = selected.borrow_mut().take();
     Ok(result)
+}
+
+fn refresh_folio_tree(
+    ui_weak: &slint::Weak<MainWindow>,
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+) {
+    let folders = {
+        let guard = catalog_state.borrow();
+        let Some(session) = guard.as_ref() else {
+            return;
+        };
+        match session.service.list_folders() {
+            Ok(list) => list,
+            Err(err) => {
+                eprintln!("Failed to list folders: {err}");
+                return;
+            }
+        }
+    };
+
+    let tree = build_folder_tree(&folders);
+    {
+        let guard = folio_state.borrow();
+        guard.folder_tree.set_vec(tree);
+    }
+
+    if let Some(ui) = ui_weak.upgrade() {
+        ui.set_folder_tree(folio_state.borrow().folder_tree.clone().into());
+    }
+}
+
+fn build_folder_tree(folders: &[Folder]) -> Vec<FolderNode> {
+    let mut paths: Vec<String> = folders.iter().map(|f| f.path.clone()).collect();
+    paths.sort();
+    paths.dedup();
+
+    let mut seen = HashSet::new();
+    let mut nodes = Vec::new();
+
+    for path in paths {
+        let mut cumulative = if path.starts_with('/') {
+            String::from("/")
+        } else {
+            String::new()
+        };
+        for (idx, part) in path.split('/').filter(|s| !s.is_empty()).enumerate() {
+            if cumulative != "/" && !cumulative.is_empty() {
+                cumulative.push('/');
+            }
+            cumulative.push_str(part);
+            if seen.insert(cumulative.clone()) {
+                nodes.push(FolderNode {
+                    name: part.into(),
+                    full_path: cumulative.clone().into(),
+                    depth: idx as i32,
+                });
+            }
+        }
+    }
+
+    nodes.sort_by(|a, b| a.full_path.cmp(&b.full_path));
+    nodes
+}
+
+fn load_folder_thumbnails(
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+    folder_path: &Path,
+) {
+    let (items, total_size) = {
+        let guard = catalog_state.borrow();
+        let Some(session) = guard.as_ref() else {
+            return;
+        };
+        let filters = folio_state.borrow().filters.clone();
+        let images = match session.service.list_images_in_folder(folder_path) {
+            Ok(list) => list,
+            Err(err) => {
+                eprintln!("Failed to list images: {err}");
+                return;
+            }
+        };
+        let mut total_size = 0u64;
+        let mut items = Vec::new();
+        for img in images {
+            if !passes_filters(&img, &filters) {
+                continue;
+            }
+
+            if let Some(sz) = img.filesize {
+                total_size += sz as u64;
+            }
+
+            let display_thumb = load_or_generate_thumbnail(&session.service, &img)
+                .unwrap_or_else(placeholder_image);
+
+            items.push(ThumbnailItem {
+                id: img.id as i32,
+                path: SharedString::from(img.original_path.clone()),
+                display_thumb,
+                selected: false,
+                rating: img.rating.unwrap_or(0) as i32,
+                flag: SharedString::from(img.flag.unwrap_or_default()),
+                color_label: SharedString::from(img.color_label.unwrap_or_default()),
+            });
+        }
+        (items, total_size)
+    };
+
+    let count = items.len();
+    {
+        let mut guard = folio_state.borrow_mut();
+        guard.thumbnails.set_vec(items);
+        guard.reset_selection();
+    }
+
+    if let Some(ui) = ui_weak.upgrade() {
+        ui.set_thumbnails(folio_state.borrow().thumbnails.clone().into());
+        ui.set_folio_total_count(count as i32);
+        ui.set_folio_selected_count(0);
+        ui.set_folio_size_summary(human_size(total_size).into());
+        ui.set_metadata(empty_metadata());
+        ui.set_keywords_text("".into());
+        ui.set_selected_image_id(-1);
+    }
+}
+
+fn passes_filters(image: &CatalogImage, filters: &FilterState) -> bool {
+    if filters.rating > 0 && image.rating.unwrap_or(0) < filters.rating as i64 {
+        return false;
+    }
+
+    if !filters.flag.is_empty()
+        && image
+            .flag
+            .as_deref()
+            .map(|f| f != filters.flag.as_str())
+            .unwrap_or(true)
+    {
+        return false;
+    }
+
+    if !filters.color_label.is_empty()
+        && image
+            .color_label
+            .as_deref()
+            .map(|c| c != filters.color_label.as_str())
+            .unwrap_or(true)
+    {
+        return false;
+    }
+
+    if !filters.search.is_empty() {
+        let needle = filters.search.to_ascii_lowercase();
+        let haystack = format!(
+            "{} {}",
+            image.filename.to_ascii_lowercase(),
+            image.original_path.to_ascii_lowercase()
+        );
+        if !haystack.contains(&needle) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn load_or_generate_thumbnail(
+    service: &CatalogService,
+    image: &CatalogImage,
+) -> Option<slint::Image> {
+    if let Ok(Some(thumb)) = service.load_thumbnail(image.id) {
+        if let Some(img) = thumbnail_to_image(&thumb) {
+            return Some(img);
+        }
+    }
+
+    let path = PathBuf::from(&image.original_path);
+    if let Ok(Some(thumb)) = service.generate_thumbnail(image.id, &path) {
+        return thumbnail_to_image(&thumb);
+    }
+
+    None
+}
+
+fn thumbnail_to_image(thumb: &Thumbnail) -> Option<slint::Image> {
+    if let Some(bytes) = thumb
+        .thumb_256
+        .as_ref()
+        .or_else(|| thumb.thumb_1024.as_ref())
+    {
+        return decode_thumbnail(bytes);
+    }
+    None
+}
+
+fn decode_thumbnail(bytes: &[u8]) -> Option<slint::Image> {
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (width, height) = img.dimensions();
+    let buffer =
+        SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(img.as_raw(), width, height);
+    Some(slint::Image::from_rgba8(buffer))
+}
+
+fn handle_thumbnail_selection(
+    image_id: i32,
+    range_select: bool,
+    toggle: bool,
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+) {
+    let mut guard = folio_state.borrow_mut();
+    let mut clicked_index: Option<usize> = None;
+    for idx in 0..guard.thumbnails.row_count() {
+        if let Some(thumb) = guard.thumbnails.row_data(idx) {
+            if thumb.id == image_id {
+                clicked_index = Some(idx);
+                break;
+            }
+        }
+    }
+
+    let Some(idx) = clicked_index else {
+        return;
+    };
+
+    if range_select {
+        let anchor = guard.selection_anchor.unwrap_or(idx);
+        let (start, end) = if anchor <= idx {
+            (anchor, idx)
+        } else {
+            (idx, anchor)
+        };
+
+        guard.selection.clear();
+        for i in 0..guard.thumbnails.row_count() {
+            if let Some(mut thumb) = guard.thumbnails.row_data(i) {
+                let selected = i >= start && i <= end;
+                thumb.selected = selected;
+                if selected {
+                    guard.selection.push(thumb.id);
+                }
+                guard.thumbnails.set_row_data(i, thumb);
+            }
+        }
+        guard.selection_anchor = Some(idx);
+    } else if toggle {
+        if let Some(mut thumb) = guard.thumbnails.row_data(idx) {
+            thumb.selected = !thumb.selected;
+            if thumb.selected {
+                if !guard.selection.contains(&thumb.id) {
+                    guard.selection.push(thumb.id);
+                }
+            } else {
+                guard.selection.retain(|id| *id != thumb.id);
+            }
+            guard.thumbnails.set_row_data(idx, thumb);
+        }
+        guard.selection_anchor = Some(idx);
+    } else {
+        guard.selection.clear();
+        for i in 0..guard.thumbnails.row_count() {
+            if let Some(mut thumb) = guard.thumbnails.row_data(i) {
+                let selected = i == idx;
+                thumb.selected = selected;
+                if selected {
+                    guard.selection.push(thumb.id);
+                }
+                guard.thumbnails.set_row_data(i, thumb);
+            }
+        }
+        guard.selection_anchor = Some(idx);
+    }
+
+    let selected_first = guard.selection.first().copied();
+    let selected_len = guard.selection.len();
+    drop(guard);
+
+    if let Some(ui) = ui_weak.upgrade() {
+        ui.set_folio_selected_count(selected_len as i32);
+        if let Some(first) = selected_first {
+            ui.set_selected_image_id(first as i32);
+            refresh_metadata_panel(catalog_state, ui_weak, first as i64);
+        } else {
+            ui.set_selected_image_id(-1);
+            ui.set_metadata(empty_metadata());
+            ui.set_keywords_text("".into());
+        }
+    }
+}
+
+fn refresh_metadata_panel(
+    catalog_state: &CatalogState,
+    ui_weak: &slint::Weak<MainWindow>,
+    image_id: i64,
+) {
+    let meta = {
+        let guard = catalog_state.borrow();
+        let Some(session) = guard.as_ref() else {
+            return;
+        };
+        match session.service.load_metadata(image_id) {
+            Ok(meta) => meta,
+            Err(err) => {
+                eprintln!("Failed to load metadata: {err}");
+                return;
+            }
+        }
+    };
+
+    let image = meta.image;
+    let keywords_vec: Vec<SharedString> = meta
+        .keywords
+        .iter()
+        .map(|k| SharedString::from(k.clone()))
+        .collect();
+    let keywords_model: Rc<VecModel<SharedString>> = Rc::new(VecModel::from(keywords_vec));
+
+    let captured_at = image
+        .captured_at
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    let camera = image.camera_model.or(image.camera_make).unwrap_or_default();
+    let lens = image.lens_model.unwrap_or_default();
+    let focal_length = image
+        .focal_length
+        .map(|f| format!("{f:.1}mm"))
+        .unwrap_or_default();
+    let aperture = image
+        .aperture
+        .map(|a| format!("f/{a:.1}"))
+        .unwrap_or_default();
+    let shutter_speed = image
+        .shutter_speed
+        .map(|s| {
+            if s >= 1.0 {
+                format!("{s:.1}s")
+            } else {
+                format!("1/{:.0}s", 1.0 / s.max(f64::EPSILON))
+            }
+        })
+        .unwrap_or_default();
+    let iso = image.iso.map(|i| i.to_string()).unwrap_or_default();
+    let gps_lat = image
+        .gps_latitude
+        .map(|v| format!("{v:.5}"))
+        .unwrap_or_default();
+    let gps_lon = image
+        .gps_longitude
+        .map(|v| format!("{v:.5}"))
+        .unwrap_or_default();
+
+    let ui_metadata = ImageMetadata {
+        file_path: image.original_path.clone().into(),
+        captured_at: captured_at.into(),
+        camera: camera.into(),
+        lens: lens.into(),
+        focal_length: focal_length.into(),
+        aperture: aperture.into(),
+        shutter_speed: shutter_speed.into(),
+        iso: iso.into(),
+        gps_lat: gps_lat.into(),
+        gps_lon: gps_lon.into(),
+        rating: image.rating.unwrap_or(0) as i32,
+        flag: image.flag.clone().unwrap_or_default().into(),
+        color_label: image.color_label.clone().unwrap_or_default().into(),
+        keywords: keywords_model.clone().into(),
+    };
+
+    if let Some(ui) = ui_weak.upgrade() {
+        ui.set_metadata(ui_metadata);
+        ui.set_keywords_text(meta.keywords.join(", ").into());
+        ui.set_selected_image_id(image_id as i32);
+    }
+}
+
+fn update_rating(catalog_state: &CatalogState, image_id: i32, rating: i32) -> anyhow::Result<()> {
+    let mut guard = catalog_state.borrow_mut();
+    let session = guard.as_mut().context("No catalog open")?;
+    session.service.update_rating(image_id as i64, rating)?;
+    Ok(())
+}
+
+fn update_flag(catalog_state: &CatalogState, image_id: i32, flag: &str) -> anyhow::Result<()> {
+    let mut guard = catalog_state.borrow_mut();
+    let session = guard.as_mut().context("No catalog open")?;
+    let normalized = if flag.is_empty() {
+        None
+    } else {
+        Some(flag.to_string())
+    };
+    session.service.update_flag(image_id as i64, normalized)?;
+    Ok(())
+}
+
+fn update_color_label(
+    catalog_state: &CatalogState,
+    image_id: i32,
+    label: &str,
+) -> anyhow::Result<()> {
+    let mut guard = catalog_state.borrow_mut();
+    let session = guard.as_mut().context("No catalog open")?;
+    let normalized = if label.is_empty() {
+        None
+    } else {
+        Some(label.to_string())
+    };
+    session
+        .service
+        .update_color_label(image_id as i64, normalized)?;
+    Ok(())
+}
+
+fn update_keywords(
+    catalog_state: &CatalogState,
+    image_id: i32,
+    keywords: Vec<String>,
+) -> anyhow::Result<()> {
+    let mut guard = catalog_state.borrow_mut();
+    let session = guard.as_mut().context("No catalog open")?;
+    session
+        .service
+        .update_keywords(image_id as i64, &keywords)?;
+    Ok(())
+}
+
+fn open_refine_screen(
+    catalog_state: &CatalogState,
+    ui_weak: &slint::Weak<MainWindow>,
+    engine: &Arc<ImageEngine>,
+    image_id: i32,
+) {
+    let file_path = {
+        let guard = catalog_state.borrow();
+        let Some(session) = guard.as_ref() else {
+            return;
+        };
+        match session.service.load_metadata(image_id as i64) {
+            Ok(meta) => meta.image.original_path,
+            Err(err) => {
+                eprintln!("Failed to open refine metadata: {err}");
+                return;
+            }
+        }
+    };
+
+    let path_buf = PathBuf::from(&file_path);
+    if let Some(ui) = ui_weak.upgrade() {
+        ui.set_refine_image_id(image_id);
+        ui.set_refine_path(file_path.clone().into());
+        ui.set_refine_exposure(0.0);
+        ui.set_refine_contrast(0.0);
+        ui.set_refine_highlights(0.0);
+        ui.set_refine_shadows(0.0);
+        ui.set_refine_whites(0.0);
+        ui.set_refine_blacks(0.0);
+        ui.set_current_tab(1);
+    }
+
+    let ui_for_preview = ui_weak.clone();
+    let engine = engine.clone();
+    std::thread::spawn(move || match engine.open_preview(&path_buf, 1600) {
+        Ok(preview) => {
+            let width = preview.width;
+            let height = preview.height;
+            let data = preview.data;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_for_preview.upgrade() {
+                    let buf = preview_to_pixel_buffer(width, height, data);
+                    ui.set_refine_preview(slint::Image::from_rgba8(buf));
+                }
+            })
+            .ok();
+        }
+        Err(err) => {
+            eprintln!("Failed to render refine preview: {err}");
+        }
+    });
+}
+
+fn apply_refine_edits(
+    catalog_state: &CatalogState,
+    image_id: i32,
+    exposure: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+) -> anyhow::Result<()> {
+    let mut guard = catalog_state.borrow_mut();
+    let session = guard.as_mut().context("No catalog open")?;
+    let edits_record = Edits {
+        id: 0,
+        image_id: image_id as i64,
+        exposure: Some(exposure as f64),
+        contrast: Some(contrast as f64),
+        highlights: Some(highlights as f64),
+        shadows: Some(shadows as f64),
+        whites: Some(whites as f64),
+        blacks: Some(blacks as f64),
+        vibrance: None,
+        saturation: None,
+        temperature: None,
+        tint: None,
+        texture: None,
+        clarity: None,
+        dehaze: None,
+        parametric_curve_json: None,
+        color_grading_json: None,
+        crop_json: None,
+        masking_json: None,
+        updated_at: None,
+    };
+    session.service.apply_edits(image_id as i64, edits_record)?;
+    Ok(())
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{:.0} {}", size, UNITS[unit])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit])
+    }
 }

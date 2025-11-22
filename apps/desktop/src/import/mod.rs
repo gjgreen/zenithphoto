@@ -367,7 +367,9 @@ mod tests {
     use tempfile::tempdir;
 
     fn write_test_image(path: &Path) {
-        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([120, 10, 200, 255]));
+        let seed = (path.to_string_lossy().len() as u8).wrapping_mul(17).wrapping_add(3);
+        let img =
+            image::RgbaImage::from_pixel(64, 64, image::Rgba([seed, seed.wrapping_add(10), 200, 255]));
         img.save(path).unwrap();
     }
 

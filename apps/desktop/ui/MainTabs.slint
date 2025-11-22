@@ -1,0 +1,55 @@
+component TabButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    callback clicked;
+
+    width: 120px;
+    height: 28px;
+    border-radius: 6px;
+    background: selected ? #1f4fff : #1c1c1c;
+    opacity: selected ? 1.0 : 0.9;
+
+    Text {
+        text: root.label;
+        color: selected ? #ffffff : #d0d0d0;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-weight: selected ? 700 : 500;
+    }
+
+    TouchArea {
+        clicked => root.clicked();
+    }
+}
+
+export component MainTabs inherits Rectangle {
+    in-out property <int> current_tab: 0; // 0 = Folio, 1 = Refine
+    callback open_folio;
+    callback open_refine;
+
+    height: 44px;
+    background: #121212;
+
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 8px;
+
+        TabButton {
+            label: "Folio";
+            selected: root.current_tab == 0;
+            clicked => {
+                root.current_tab = 0;
+                root.open_folio();
+            }
+        }
+
+        TabButton {
+            label: "Refine";
+            selected: root.current_tab == 1;
+            clicked => {
+                root.current_tab = 1;
+                root.open_refine();
+            }
+        }
+    }
+}

@@ -72,7 +72,7 @@ impl Thumbnail {
         Ok(())
     }
 
-    fn from_row(row: &rusqlite::Row<'_>) -> DbResult<Self> {
+    pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> DbResult<Self> {
         Ok(Self {
             image_id: row.get(0)?,
             thumb_256: row.get(1)?,
