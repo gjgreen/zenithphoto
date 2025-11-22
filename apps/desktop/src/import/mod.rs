@@ -17,7 +17,6 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
 #[derive(Clone)]
 pub struct ImportCandidate {
     pub path: PathBuf,
-    pub extension: String,
     pub thumb: Option<SlintImage>,
 }
 
@@ -118,6 +117,7 @@ impl CancellationFlag {
     }
 }
 
+#[cfg(test)]
 pub async fn scan_directory(path: &Path) -> Result<Vec<ImportCandidate>> {
     scan_directory_with_options(path, ScanOptions::default()).await
 }
@@ -140,20 +140,22 @@ fn scan_directory_blocking(path: &Path, options: ScanOptions) -> Result<Vec<Impo
             continue;
         }
 
-        let ext = match entry
+        let Some(ext) = entry
             .path()
             .extension()
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase())
-        {
-            Some(ext) if is_supported_extension(&ext) => ext,
-            _ => continue,
+        else {
+            continue;
         };
+
+        if !is_supported_extension(&ext) {
+            continue;
+        }
 
         let thumb = decode_thumbnail(entry.path());
         let candidate = ImportCandidate {
             path: entry.path().to_path_buf(),
-            extension: ext,
             thumb,
         };
 
@@ -165,25 +167,6 @@ fn scan_directory_blocking(path: &Path, options: ScanOptions) -> Result<Vec<Impo
     }
 
     Ok(out)
-}
-
-pub async fn import_images(
-    service: &CatalogService,
-    file_paths: &[PathBuf],
-    keywords: &[String],
-    method: ImportMethod,
-    destination: Option<PathBuf>,
-) -> Result<()> {
-    import_images_with_callbacks(
-        service,
-        file_paths,
-        keywords,
-        method,
-        destination,
-        ImportCallbacks::default(),
-    )
-    .await
-    .map(|_| ())
 }
 
 pub async fn import_images_with_callbacks(
@@ -217,6 +200,13 @@ pub async fn import_images_with_callbacks(
             report.canceled = true;
             break;
         }
+
+        callbacks.emit_progress(
+            ImportStage::Scanning,
+            idx,
+            total,
+            format!("Hashing {}", src.display()),
+        );
 
         let hash = CatalogService::compute_file_hash(src)
             .with_context(|| format!("failed to hash file {}", src.display()))?;
@@ -295,10 +285,7 @@ pub async fn import_images_with_callbacks(
         );
         for kw in &normalized_keywords {
             if let Err(err) = service.add_keyword_to_image(image.id, kw) {
-                callbacks.emit_error(
-                    target_path.clone(),
-                    format!("keyword '{kw}' failed: {err}"),
-                );
+                callbacks.emit_error(target_path.clone(), format!("keyword '{kw}' failed: {err}"));
             }
         }
 
@@ -346,8 +333,13 @@ fn copy_into_destination(src: &Path, dest_dir: &Path) -> Result<PathBuf> {
     let dest_path = dest_dir.join(filename);
     fs::create_dir_all(dest_dir)
         .with_context(|| format!("failed to create destination {}", dest_dir.display()))?;
-    fs::copy(src, &dest_path)
-        .with_context(|| format!("failed to copy {} to {}", src.display(), dest_path.display()))?;
+    fs::copy(src, &dest_path).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            src.display(),
+            dest_path.display()
+        )
+    })?;
     Ok(dest_path)
 }
 

@@ -109,8 +109,8 @@ export component ImportPhotosScreen inherits Window {
                     border-radius: 6px;
                     horizontal-stretch: 1;
                     ScrollView {
-                        padding: 8px;
                         VerticalLayout {
+                            padding: 8px;
                             spacing: 8px;
 
                             for thumb[idx] in root.thumbnails: Rectangle {
@@ -143,16 +143,16 @@ export component ImportPhotosScreen inherits Window {
                                         checked: thumb.selected;
                                         enabled: !root.importing;
                                         toggled => {
-                                            root.thumbnails[idx].selected = !thumb.selected;
-                                            root.thumbnail_toggled(thumb.path, !thumb.selected);
+                                            root.thumbnail_toggled(thumb.path, self.checked);
                                         }
                                     }
                                 }
 
                                 TouchArea {
                                     clicked => {
-                                        root.thumbnails[idx].selected = !thumb.selected;
-                                        root.thumbnail_toggled(thumb.path, !thumb.selected);
+                                        if (!root.importing) {
+                                            root.thumbnail_toggled(thumb.path, !thumb.selected);
+                                        }
                                     }
                                 }
                             }

@@ -3,9 +3,10 @@ mod import;
 
 slint::include_modules!(); // from build.rs compiled ui/main.slint and catalog_dialog.slint
 
+use anyhow::{anyhow, Context};
 use catalog::db::CatalogDb;
 use catalog::services::CatalogService;
-use catalog::{Catalog, CatalogError, CatalogPath, NewImage};
+use catalog::{Catalog, CatalogPath};
 use config::ConfigStore;
 use engine::ImageEngine;
 use import::{
@@ -32,13 +33,13 @@ fn preview_to_pixel_buffer(
 }
 
 struct CatalogSession {
-    catalog: Catalog,
+    service: CatalogService,
     path: PathBuf,
 }
 
 impl CatalogSession {
-    fn new(catalog: Catalog, path: PathBuf) -> Self {
-        Self { catalog, path }
+    fn new(service: CatalogService, path: PathBuf) -> Self {
+        Self { service, path }
     }
 }
 
@@ -51,11 +52,11 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let mut startup_error: Option<String> = None;
-    let mut catalog_pair: Option<(Catalog, PathBuf)> = None;
+    let mut catalog_pair: Option<(CatalogService, PathBuf)> = None;
 
     if let Some(path) = config_store.last_catalog() {
-        match open_catalog(&path) {
-            Ok(cat) => catalog_pair = Some((cat, path)),
+        match open_catalog_service(&path) {
+            Ok((cat, resolved)) => catalog_pair = Some((cat, resolved)),
             Err(err) => {
                 eprintln!("Failed to open last catalog from config: {err}");
                 startup_error = Some(format!("Failed to open last catalog: {err}"));
@@ -65,8 +66,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     if catalog_pair.is_none() {
         if let Some(path) = Catalog::last_used() {
-            match open_catalog(&path) {
-                Ok(cat) => catalog_pair = Some((cat, path)),
+            match open_catalog_service(&path) {
+                Ok((cat, resolved)) => catalog_pair = Some((cat, resolved)),
                 Err(err) => {
                     eprintln!("Failed to open cached catalog: {err}");
                     if startup_error.is_none() {
@@ -81,7 +82,7 @@ fn main() -> Result<(), slint::PlatformError> {
         catalog_pair = prompt_for_catalog_dialog(startup_error)?;
     }
 
-    let Some((catalog, catalog_path)) = catalog_pair else {
+    let Some((catalog_service, catalog_path)) = catalog_pair else {
         return Ok(());
     };
 
@@ -105,7 +106,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_recent_catalogs(recent_model.clone().into());
 
     let catalog_state = Rc::new(RefCell::new(Some(CatalogSession::new(
-        catalog,
+        catalog_service,
         catalog_path.clone(),
     ))));
     let engine = Arc::new(ImageEngine::new());
@@ -131,18 +132,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 {
                     let catalog_guard = catalog_for_ui.borrow();
                     if let Some(session) = catalog_guard.as_ref() {
-                        let _ = session.catalog.insert_image(NewImage {
-                            file_path: path.clone(),
-                            rating: None,
-                            flags: None,
-                            capture_time_utc: None,
-                            camera_make: None,
-                            camera_model: None,
-                            aperture: None,
-                            shutter: None,
-                            iso: None,
-                            focal_length: None,
-                        });
+                        match session.service.import_image(&path) {
+                            Ok(image) => {
+                                if let Err(err) =
+                                    session.service.generate_thumbnail(image.id, &path)
+                                {
+                                    eprintln!("Failed to generate thumbnail for preview: {err}");
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!("Failed to add image to catalog: {err}");
+                            }
+                        }
                     } else {
                         return;
                     }
@@ -286,9 +287,8 @@ fn spawn_new_catalog_dialog(
             .await
         {
             let requested_path = handle.path().to_path_buf();
-            match Catalog::create(&requested_path) {
-                Ok(catalog) => {
-                    let resolved_path = catalog.path().to_path_buf();
+            match create_catalog_service(&requested_path) {
+                Ok((catalog, resolved_path)) => {
                     apply_loaded_catalog(
                         catalog,
                         resolved_path,
@@ -319,11 +319,11 @@ fn load_catalog_from_path(
         ));
     }
 
-    let catalog =
-        open_catalog(&normalized_path).map_err(|err| format!("Unable to open catalog: {err}"))?;
+    let (catalog, resolved_path) = open_catalog_service(&normalized_path)
+        .map_err(|err| format!("Unable to open catalog: {err}"))?;
     apply_loaded_catalog(
         catalog,
-        normalized_path,
+        resolved_path,
         ui_weak,
         catalog_state,
         config_store,
@@ -333,7 +333,7 @@ fn load_catalog_from_path(
 }
 
 fn apply_loaded_catalog(
-    catalog: Catalog,
+    catalog: CatalogService,
     path: PathBuf,
     ui_weak: &slint::Weak<MainWindow>,
     catalog_state: &CatalogState,
@@ -581,11 +581,15 @@ fn begin_import(
         if let Some(ui) = ui_for_progress.upgrade() {
             let total = progress.total.max(1);
             let pct = (progress.completed as f32) / (total as f32);
+            let label = progress
+                .message
+                .as_deref()
+                .unwrap_or(stage_label(&progress.stage));
             ui.set_progress(pct);
             ui.set_status_text(
                 format!(
                     "{} ({}/{})",
-                    stage_label(&progress.stage),
+                    label,
                     progress.completed,
                     progress.total
                 )
@@ -726,7 +730,11 @@ fn launch_import_flow(
             let view_state = view_state.clone();
             let _ = slint::spawn_local(async move {
                 if let Some(handle) = AsyncFileDialog::new().pick_folder().await {
-                    start_scan_for_directory(&import_ui_weak, &view_state, handle.path().to_path_buf());
+                    start_scan_for_directory(
+                        &import_ui_weak,
+                        &view_state,
+                        handle.path().to_path_buf(),
+                    );
                 }
             });
         });
@@ -736,11 +744,7 @@ fn launch_import_flow(
         let import_ui_weak = import_ui_weak.clone();
         let view_state = view_state.clone();
         import_ui.on_directory_selected(move |path| {
-            start_scan_for_directory(
-                &import_ui_weak,
-                &view_state,
-                PathBuf::from(path.as_str()),
-            );
+            start_scan_for_directory(&import_ui_weak, &view_state, PathBuf::from(path.as_str()));
         });
     }
 
@@ -802,8 +806,7 @@ fn launch_import_flow(
                     .upgrade()
                     .map(|ui| ui.get_allow_duplicates())
                     .unwrap_or(false);
-                let files: Vec<PathBuf> =
-                    paths.iter().map(|p| PathBuf::from(p.as_str())).collect();
+                let files: Vec<PathBuf> = paths.iter().map(|p| PathBuf::from(p.as_str())).collect();
                 let keywords = parse_keywords(keyword_text.as_str());
                 let method = match method_str.as_str() {
                     "Copy" => ImportMethod::Copy,
@@ -851,19 +854,34 @@ fn refresh_recent_model(model: &Rc<VecModel<SharedString>>, entries: &[PathBuf])
     model.set_vec(data);
 }
 
-fn open_catalog(path: &Path) -> Result<Catalog, CatalogError> {
-    Catalog::open(path)
+fn open_catalog_service(path: &Path) -> anyhow::Result<(CatalogService, PathBuf)> {
+    let normalized_path = CatalogPath::new(path).into_path();
+    let db_path = normalized_path
+        .to_str()
+        .ok_or_else(|| anyhow!("invalid catalog path"))?;
+    let db = CatalogDb::open(db_path)?;
+    Ok((CatalogService::new(db), normalized_path))
+}
+
+fn create_catalog_service(path: &Path) -> anyhow::Result<(CatalogService, PathBuf)> {
+    let normalized_path = CatalogPath::new(path).into_path();
+    if let Some(parent) = normalized_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create catalog directory {}", parent.display()))?;
+    }
+
+    open_catalog_service(&normalized_path)
 }
 
 fn prompt_for_catalog_dialog(
     initial_error: Option<String>,
-) -> Result<Option<(Catalog, PathBuf)>, slint::PlatformError> {
+) -> Result<Option<(CatalogService, PathBuf)>, slint::PlatformError> {
     let dialog = CatalogDialog::new()?;
     if let Some(msg) = initial_error {
         dialog.set_error_text(msg.into());
     }
 
-    let selected: Rc<RefCell<Option<(Catalog, PathBuf)>>> = Rc::new(RefCell::new(None));
+    let selected: Rc<RefCell<Option<(CatalogService, PathBuf)>>> = Rc::new(RefCell::new(None));
 
     {
         let dialog_weak = dialog.as_weak();
@@ -873,9 +891,10 @@ fn prompt_for_catalog_dialog(
                 .add_filter("Zenith Catalog", &["zenithphotocatalog", "sqlite"])
                 .pick_file()
             {
-                match open_catalog(&path) {
-                    Ok(cat) => {
-                        *selected.borrow_mut() = Some((cat, path.clone()));
+                let normalized = CatalogPath::new(&path).into_path();
+                match open_catalog_service(&normalized) {
+                    Ok((cat, resolved)) => {
+                        *selected.borrow_mut() = Some((cat, resolved));
                         slint::quit_event_loop().ok();
                     }
                     Err(err) => {
@@ -897,9 +916,9 @@ fn prompt_for_catalog_dialog(
                 .add_filter("Zenith Catalog", &["zenithphotocatalog", "sqlite"])
                 .save_file()
             {
-                match Catalog::create(&path) {
-                    Ok(cat) => {
-                        *selected.borrow_mut() = Some((cat, path.clone()));
+                match create_catalog_service(&path) {
+                    Ok((cat, resolved)) => {
+                        *selected.borrow_mut() = Some((cat, resolved));
                         slint::quit_event_loop().ok();
                     }
                     Err(err) => {

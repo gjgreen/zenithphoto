@@ -32,11 +32,13 @@ export component CatalogDialog inherits Window {
             if error-text != "" : Rectangle {
                 background: #34252c;
                 border-radius: 6px;
-                padding: 8px;
-                Text {
-                    text: error-text;
-                    color: #ff7a7a;
-                    wrap: word-wrap;
+                VerticalLayout {
+                    padding: 8px;
+                    Text {
+                        text: error-text;
+                        color: #ff7a7a;
+                        wrap: word-wrap;
+                    }
                 }
             }
 

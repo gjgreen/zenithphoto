@@ -350,11 +350,10 @@ impl CatalogService {
             Ok(img) => {
                 let thumb_256 =
                     Self::thumbnail_bytes(&img, 256).context("failed to encode 256px thumbnail")?;
-                let thumb_1024 =
-                    Self::thumbnail_bytes(&img, 1024).context("failed to encode 1024px thumbnail")?;
+                let thumb_1024 = Self::thumbnail_bytes(&img, 1024)
+                    .context("failed to encode 1024px thumbnail")?;
 
-                let thumb =
-                    self.upsert_thumbnail(image_id, Some(thumb_256), Some(thumb_1024))?;
+                let thumb = self.upsert_thumbnail(image_id, Some(thumb_256), Some(thumb_1024))?;
                 Ok(Some(thumb))
             }
             Err(err) => {
