@@ -6,8 +6,10 @@ import { RefineScreen } from "RefineScreen.slint";
 export { CatalogDialog, ImportPhotosScreen }
 
 export component MainWindow inherits Window {
-    width: 1400px;
-    height: 900px;
+    preferred-width: 1400px;
+    preferred-height: 900px;
+    min-width: 1024px;
+    min-height: 720px;
     title: "ZenithPhoto";
 
     in-out property <int> current-tab: 0; // 0 = Folio, 1 = Refine
