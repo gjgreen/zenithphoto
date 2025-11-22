@@ -18,6 +18,7 @@ pub mod images;
 pub mod keywords;
 pub mod migrations;
 pub mod previews;
+pub mod search;
 pub mod thumbnails;
 
 pub use catalog_metadata::CatalogMetadata;
@@ -32,6 +33,7 @@ pub use images::Image;
 pub use keywords::Keyword;
 pub use migrations::{Migration, MIGRATIONS};
 pub use previews::Preview;
+pub use search::{rebuild_fts, search_folders, search_images, search_keywords};
 pub use thumbnails::Thumbnail;
 
 pub type DbResult<T> = anyhow::Result<T>;

@@ -100,9 +100,96 @@ pub const MIGRATIONS: &[Migration] = &[
             END;
         "#,
     },
+    // Introduce FTS5 contentless indexes for keywords, images, and folders.
+    Migration {
+        from: 4,
+        to: 5,
+        sql: r#"
+            DROP TABLE IF EXISTS image_search_fts;
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_keywords
+            USING fts5(keyword, content='', tokenize='unicode61');
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_images
+            USING fts5(
+                filename,
+                original_path,
+                metadata_json,
+                content='',
+                tokenize='unicode61'
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_folders
+            USING fts5(path, content='', tokenize='unicode61');
+
+            CREATE TRIGGER IF NOT EXISTS keywords_fts_ai
+            AFTER INSERT ON keywords
+            BEGIN
+                INSERT INTO fts_keywords(rowid, keyword) VALUES (new.id, new.keyword);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS keywords_fts_ad
+            AFTER DELETE ON keywords
+            BEGIN
+                INSERT INTO fts_keywords(fts_keywords, rowid) VALUES ('delete', old.id);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS keywords_fts_au
+            AFTER UPDATE ON keywords
+            BEGIN
+                INSERT INTO fts_keywords(fts_keywords, rowid) VALUES ('delete', old.id);
+                INSERT INTO fts_keywords(rowid, keyword) VALUES (new.id, new.keyword);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS images_fts_ai
+            AFTER INSERT ON images
+            BEGIN
+                INSERT INTO fts_images(rowid, filename, original_path, metadata_json)
+                VALUES (new.id, new.filename, new.original_path, COALESCE(new.metadata_json, ''));
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS images_fts_ad
+            AFTER DELETE ON images
+            BEGIN
+                INSERT INTO fts_images(fts_images, rowid) VALUES ('delete', old.id);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS images_fts_au
+            AFTER UPDATE ON images
+            BEGIN
+                INSERT INTO fts_images(fts_images, rowid) VALUES ('delete', old.id);
+                INSERT INTO fts_images(rowid, filename, original_path, metadata_json)
+                VALUES (new.id, new.filename, new.original_path, COALESCE(new.metadata_json, ''));
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS folders_fts_ai
+            AFTER INSERT ON folders
+            BEGIN
+                INSERT INTO fts_folders(rowid, path) VALUES (new.id, new.path);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS folders_fts_ad
+            AFTER DELETE ON folders
+            BEGIN
+                INSERT INTO fts_folders(fts_folders, rowid) VALUES ('delete', old.id);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS folders_fts_au
+            AFTER UPDATE ON folders
+            BEGIN
+                INSERT INTO fts_folders(fts_folders, rowid) VALUES ('delete', old.id);
+                INSERT INTO fts_folders(rowid, path) VALUES (new.id, new.path);
+            END;
+
+            INSERT INTO fts_keywords(rowid, keyword) SELECT id, keyword FROM keywords;
+            INSERT INTO fts_images(rowid, filename, original_path, metadata_json)
+            SELECT id, filename, original_path, COALESCE(metadata_json, '') FROM images;
+            INSERT INTO fts_folders(rowid, path) SELECT id, path FROM folders;
+        "#,
+    },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i32 = 4;
+pub const LATEST_SCHEMA_VERSION: i32 = 5;
 
 pub fn current_schema_version(db: &CatalogDb) -> DbResult<i32> {
     current_schema_version_for_conn(db.conn())
@@ -206,12 +293,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, LATEST_SCHEMA_VERSION);
-        let fts_count: i64 = conn
-            .query_row("SELECT count(*) FROM image_search_fts", [], |row| {
-                row.get(0)
-            })
+        let fts_keywords: i64 = conn
+            .query_row("SELECT count(*) FROM fts_keywords", [], |row| row.get(0))
             .unwrap_or(0);
-        assert!(fts_count >= 0);
+        assert!(fts_keywords >= 0);
     }
 
     #[test]
@@ -220,11 +305,11 @@ mod tests {
         initialize_schema(&conn).unwrap();
         // Roll back schema version to simulate older catalog.
         conn.execute(
-            "UPDATE catalog_metadata SET schema_version = 2 WHERE id = 1",
+            "UPDATE catalog_metadata SET schema_version = 4 WHERE id = 1",
             [],
         )
         .unwrap();
-        conn.execute("PRAGMA user_version = 2", []).unwrap();
+        conn.execute("PRAGMA user_version = 4", []).unwrap();
 
         // Ensure migration runs from 2 -> latest.
         run_migrations_for_conn(&conn, MIGRATIONS).unwrap();

@@ -76,7 +76,7 @@ impl Folder {
         )
     }
 
-    fn from_row(row: &rusqlite::Row<'_>) -> DbResult<Self> {
+    pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> DbResult<Self> {
         Ok(Self {
             id: row.get(0)?,
             path: row.get(1)?,

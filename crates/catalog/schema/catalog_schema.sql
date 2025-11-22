@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS images (
         OR color_label IS NULL
     ),
     metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    camera_serial TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
@@ -189,14 +190,92 @@ BEGIN
     WHERE image_id = NEW.image_id;
 END;
 
+-- Full-text search virtual tables (contentless).
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_keywords
+USING fts5(keyword, content='', tokenize='unicode61');
+
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_images
+USING fts5(
+    filename,
+    original_path,
+    metadata_json,
+    content='',
+    tokenize='unicode61'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_folders
+USING fts5(path, content='', tokenize='unicode61');
+
+-- FTS triggers for keywords.
+CREATE TRIGGER IF NOT EXISTS keywords_fts_ai
+AFTER INSERT ON keywords
+BEGIN
+    INSERT INTO fts_keywords(rowid, keyword) VALUES (new.id, new.keyword);
+END;
+
+CREATE TRIGGER IF NOT EXISTS keywords_fts_ad
+AFTER DELETE ON keywords
+BEGIN
+    INSERT INTO fts_keywords(fts_keywords, rowid) VALUES ('delete', old.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS keywords_fts_au
+AFTER UPDATE ON keywords
+BEGIN
+    INSERT INTO fts_keywords(fts_keywords, rowid) VALUES ('delete', old.id);
+    INSERT INTO fts_keywords(rowid, keyword) VALUES (new.id, new.keyword);
+END;
+
+-- FTS triggers for images.
+CREATE TRIGGER IF NOT EXISTS images_fts_ai
+AFTER INSERT ON images
+BEGIN
+    INSERT INTO fts_images(rowid, filename, original_path, metadata_json)
+    VALUES (new.id, new.filename, new.original_path, COALESCE(new.metadata_json, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS images_fts_ad
+AFTER DELETE ON images
+BEGIN
+    INSERT INTO fts_images(fts_images, rowid) VALUES ('delete', old.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS images_fts_au
+AFTER UPDATE ON images
+BEGIN
+    INSERT INTO fts_images(fts_images, rowid) VALUES ('delete', old.id);
+    INSERT INTO fts_images(rowid, filename, original_path, metadata_json)
+    VALUES (new.id, new.filename, new.original_path, COALESCE(new.metadata_json, ''));
+END;
+
+-- FTS triggers for folders.
+CREATE TRIGGER IF NOT EXISTS folders_fts_ai
+AFTER INSERT ON folders
+BEGIN
+    INSERT INTO fts_folders(rowid, path) VALUES (new.id, new.path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folders_fts_ad
+AFTER DELETE ON folders
+BEGIN
+    INSERT INTO fts_folders(fts_folders, rowid) VALUES ('delete', old.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folders_fts_au
+AFTER UPDATE ON folders
+BEGIN
+    INSERT INTO fts_folders(fts_folders, rowid) VALUES ('delete', old.id);
+    INSERT INTO fts_folders(rowid, path) VALUES (new.id, new.path);
+END;
+
 INSERT INTO catalog_metadata (id, schema_version, created_at, updated_at, last_opened)
 VALUES (
     1,
-    1,
+    5,
     strftime('%Y-%m-%dT%H:%M:%fZ','now'),
     strftime('%Y-%m-%dT%H:%M:%fZ','now'),
     NULL
 )
 ON CONFLICT(id) DO NOTHING;
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 5;
