@@ -317,6 +317,21 @@ pub fn parse_keywords(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Returns true when the file already exists in the catalog by path or hash.
+pub fn is_already_imported(service: &CatalogService, path: &Path) -> bool {
+    if let Ok(Some(_)) = service.find_image_by_original_path(path) {
+        return true;
+    }
+
+    if let Ok(hash) = CatalogService::compute_file_hash(path) {
+        if let Ok(Some(_)) = service.find_image_by_hash(&hash) {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn normalize_keywords(keywords: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for kw in keywords {

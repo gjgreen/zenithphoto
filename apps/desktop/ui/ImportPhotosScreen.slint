@@ -1,27 +1,34 @@
 import { Button, CheckBox, ComboBox, ProgressIndicator, ScrollView, TextEdit } from "std-widgets.slint";
 
-export struct ImageThumbnail {
+export struct ImportThumbnail {
+    id: int,
     path: string,
     display_thumb: image,
     selected: bool,
+    checked: bool,
+    already_imported: bool,
+    selectable: bool,
 }
 
 component ImportThumbnailCard inherits Rectangle {
     in property <string> path;
     in property <image> thumbnail;
     in property <bool> selected: false;
-    in property <bool> enabled: true;
+    in property <bool> checked: false;
+    in property <bool> already-imported: false;
+    in property <bool> selectable: true;
     in property <length> thumb-size: 200px;
     in property <length> card-width: 216px;
     in property <length> card-height: 272px;
-    callback toggled(selected: bool);
+    callback thumbnail_clicked(shift: bool, ctrl: bool);
+    callback checkbox_clicked(checked: bool);
 
     width: card-width;
     height: card-height;
     preferred-width: card-width;
     preferred-height: card-height;
     border-radius: 8px;
-    background: selected ? #1f3a70 : touch_area.has-hover ? #1c1c1c : #141414;
+    background: selected ? #182c52 : touch_area.has-hover ? #1c1c1c : #141414;
     border-width: selected ? 2px : 1px;
     border-color: selected ? #3a6dff : #3a3a3a;
     clip: true;
@@ -30,50 +37,86 @@ component ImportThumbnailCard inherits Rectangle {
 
     VerticalLayout {
         padding: 10px;
-        spacing: 8px;
+        spacing: 10px;
         width: parent.width;
         height: parent.height;
 
-        Rectangle {
-            background: #0f0f0f;
-            border-radius: 6px;
-            height: root.thumb-size;
-            width: parent.width - 4px;
-            Image {
-                source: thumbnail;
-                width: parent.width;
-                height: parent.height;
-                image-fit: contain;
-                image-rendering: smooth;
+        // Selection area (thumbnail + label)
+        touch_area := TouchArea {
+            width: parent.width;
+            height: root.thumb-size + 40px;
+            enabled: root.selectable;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.up) {
+                    let ctrl = event.modifiers.control || event.modifiers.meta;
+                    thumbnail_clicked(event.modifiers.shift, ctrl);
+                }
+            }
+
+            VerticalLayout {
+                spacing: 8px;
+                Rectangle {
+                    background: #0f0f0f;
+                    border-radius: 6px;
+                    height: root.thumb-size;
+                    width: parent.width - 4px;
+                    clip: true;
+                    Image {
+                        source: thumbnail;
+                        width: parent.width;
+                        height: parent.height;
+                        image-fit: contain;
+                        image-rendering: smooth;
+                        opacity: root.selectable ? 1.0 : 0.45;
+                    }
+
+                    if root.already-imported: Rectangle {
+                        background: #000000aa;
+                        border-radius: 6px;
+                        HorizontalLayout {
+                            padding: 6px;
+                            spacing: 6px;
+                            Text {
+                                text: "Already Imported";
+                                color: #c6c6c6;
+                                font-size: 11px;
+                                font-weight: 600;
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: path;
+                    font-size: 11px;
+                    wrap: no-wrap;
+                    overflow: elide;
+                    color: root.selectable ? #d0d0d0 : #777;
+                }
             }
         }
 
-        Text {
-            text: path;
-            font-size: 11px;
-            wrap: no-wrap;
-            overflow: elide;
-            color: #d0d0d0;
-        }
-
-        CheckBox {
-            text: selected ? "Selected" : "Tap to include";
-            checked: selected;
-            enabled: root.enabled;
-            toggled => {
-                toggled(self.checked);
+        HorizontalLayout {
+            spacing: 6px;
+            CheckBox {
+                text: checked ? "Include" : "Skip";
+                checked: root.checked;
+                enabled: root.selectable && !root.already-imported;
+                toggled => {
+                    if (!root.selected) {
+                        thumbnail_clicked(false, false);
+                    }
+                    checkbox_clicked(self.checked);
+                }
+            }
+            if root.already-imported: Text {
+                text: "Already imported";
+                color: #9a9a9a;
+                font-size: 11px;
             }
         }
     }
 
-    touch_area := TouchArea {
-        width: parent.width;
-        height: parent.height;
-        enabled: root.enabled;
-        clicked => {
-            toggled(!root.selected);
-        }
-    }
 }
 
 export component ImportPhotosScreen inherits Window {
@@ -81,7 +124,7 @@ export component ImportPhotosScreen inherits Window {
     height: 900px;
     title: "Import Photos";
 
-    in-out property <[ImageThumbnail]> thumbnails;
+    in-out property <[ImportThumbnail]> thumbnails;
     in-out property <[string]> directories;
     in-out property <[string]> selected_paths;
     in-out property <[string]> error_messages;
@@ -97,8 +140,11 @@ export component ImportPhotosScreen inherits Window {
     callback directory_selected(path: string);
     callback browse_for_directory();
     callback browse_for_destination();
-    callback thumbnail_toggled(path: string, selected: bool);
+    callback thumbnail_clicked(image_id: int, shift: bool, ctrl: bool);
+    callback checkbox_clicked(checked: bool);
     callback select_all_requested(all_selected: bool);
+    callback keyboard_select_all();
+    callback keyboard_clear_selection();
     callback perform_import(
         source_directory: string,
         destination_directory: string,
@@ -120,19 +166,43 @@ export component ImportPhotosScreen inherits Window {
         show_destination = current_method != "Add";
     }
 
-    Rectangle {
-        background: #101010;
+    forward-focus: shortcuts;
+
+    shortcuts := FocusScope {
         width: parent.width;
         height: parent.height;
 
-        VerticalLayout {
-            padding: 12px;
-            spacing: 12px;
+        key_pressed(event) => {
+            if (keywords_field.has-focus) {
+                return reject;
+            }
 
-            // Main panels
-            HorizontalLayout {
+            if ((event.modifiers.control || event.modifiers.meta) && (event.text == "a" || event.text == "A")) {
+                root.keyboard_select_all();
+                return accept;
+            }
+
+            if ((event.modifiers.control || event.modifiers.meta) && (event.text == "d" || event.text == "D")) {
+                root.keyboard_clear_selection();
+                return accept;
+            }
+
+            return reject;
+        }
+
+        Rectangle {
+            background: #101010;
+            width: parent.width;
+            height: parent.height;
+
+            VerticalLayout {
+                padding: 12px;
                 spacing: 12px;
-                vertical-stretch: 1;
+
+                // Main panels
+                HorizontalLayout {
+                    spacing: 12px;
+                    vertical-stretch: 1;
 
                 // Left: directory browser
                 Rectangle {
@@ -216,18 +286,17 @@ export component ImportPhotosScreen inherits Window {
                                 card-width: root.card_width;
                                 card-height: root.card_height;
                                 selected: thumb.selected;
+                                checked: thumb.checked;
                                 path: thumb.path;
                                 thumbnail: thumb.display_thumb;
-                                enabled: !root.importing;
+                                selectable: !root.importing && thumb.selectable;
+                                already-imported: thumb.already_imported;
 
                                 x: root.thumb_padding + Math.mod(idx, grid_container.columns) * (root.card_width + root.thumb_gap);
                                 y: root.thumb_padding + Math.floor(idx / grid_container.columns) * (root.card_height + root.thumb_gap);
 
-                                toggled(selected_state) => {
-                                    if (!root.importing) {
-                                        root.thumbnail_toggled(thumb.path, selected_state);
-                                    }
-                                }
+                                thumbnail_clicked(shift, ctrl) => root.thumbnail_clicked(thumb.id, shift, ctrl);
+                                checkbox_clicked(checked_state) => root.checkbox_clicked(checked_state);
                             }
                         }
                     }
@@ -268,7 +337,7 @@ export component ImportPhotosScreen inherits Window {
                     padding: 8px;
                     spacing: 6px;
                     Text { text: "Keywords (comma-separated)"; font-weight: 600; }
-                    TextEdit {
+                    keywords_field := TextEdit {
                         text <=> root.keywords;
                         wrap: word-wrap;
                         read-only: root.importing;
@@ -299,7 +368,7 @@ export component ImportPhotosScreen inherits Window {
                         HorizontalLayout {
                             spacing: 6px;
                             CheckBox {
-                                text: "Select / Deselect All";
+                                text: "Check / Uncheck All";
                                 enabled: !root.importing;
                                 toggled => {
                                     root.select_all_requested(self.checked);
@@ -385,4 +454,5 @@ export component ImportPhotosScreen inherits Window {
             }
         }
     }
+}
 }

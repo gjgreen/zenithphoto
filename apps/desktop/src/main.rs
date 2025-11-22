@@ -10,8 +10,9 @@ use catalog::{Catalog, CatalogPath};
 use config::ConfigStore;
 use engine::ImageEngine;
 use import::{
-    import_images_with_callbacks, parse_keywords, scan_directory_with_options, CancellationFlag,
-    DuplicateStrategy, ImportCallbacks, ImportMethod, ImportProgress, ImportStage, ScanOptions,
+    import_images_with_callbacks, is_already_imported, parse_keywords, scan_directory_with_options,
+    CancellationFlag, DuplicateStrategy, ImportCallbacks, ImportMethod, ImportProgress,
+    ImportStage, ScanOptions,
 };
 use rfd::{AsyncFileDialog, FileDialog};
 use slint::{Model, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
@@ -567,13 +568,28 @@ fn apply_loaded_catalog(
     refresh_folio_tree(ui_weak, catalog_state, folio_state);
 }
 
+type ImageId = i32;
+
+/// Keeps UI selection (highlighted thumbnails) independent from checkbox state.
+/// The selected_ids set mirrors the visible highlight, while anchor_id preserves
+/// the last focused item for range selection.
+#[derive(Default)]
+struct SelectionState {
+    selected_ids: HashSet<ImageId>,
+    anchor_id: Option<ImageId>,
+}
+
 struct ImportViewState {
-    thumbnails: Rc<VecModel<ImageThumbnail>>,
+    thumbnails: Rc<VecModel<ImportThumbnail>>,
+    /// Paths that are currently marked for import (checked=true).
     selected_paths: Rc<VecModel<SharedString>>,
     errors: Rc<VecModel<SharedString>>,
     directories: Rc<VecModel<SharedString>>,
     scan_cancel: CancellationFlag,
     import_cancel: CancellationFlag,
+    /// Tracks highlighted selection separately from import checkboxes.
+    selection: SelectionState,
+    next_image_id: ImageId,
 }
 
 impl ImportViewState {
@@ -585,6 +601,8 @@ impl ImportViewState {
             directories: Rc::new(VecModel::default()),
             scan_cancel: CancellationFlag::default(),
             import_cancel: CancellationFlag::default(),
+            selection: SelectionState::default(),
+            next_image_id: 1,
         }
     }
 
@@ -594,6 +612,68 @@ impl ImportViewState {
         self.errors.set_vec(Vec::new());
         self.scan_cancel.cancel();
         self.scan_cancel = CancellationFlag::default();
+        self.selection = SelectionState::default();
+        self.next_image_id = 1;
+    }
+
+    fn is_selectable_id(&self, id: ImageId) -> bool {
+        self.index_of(id)
+            .and_then(|idx| self.thumbnails.row_data(idx))
+            .map(|thumb| thumb.selectable)
+            .unwrap_or(false)
+    }
+
+    fn index_of(&self, id: ImageId) -> Option<usize> {
+        for idx in 0..self.thumbnails.row_count() {
+            if let Some(thumb) = self.thumbnails.row_data(idx) {
+                if thumb.id == id {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
+    fn apply_selection_flags(&mut self) {
+        // Keep selection in sync with the model and drop anything non-selectable.
+        let mut invalid = Vec::new();
+        for id in &self.selection.selected_ids {
+            if !self.is_selectable_id(*id) {
+                invalid.push(*id);
+            }
+        }
+        for id in invalid {
+            self.selection.selected_ids.remove(&id);
+        }
+
+        if let Some(anchor) = self.selection.anchor_id {
+            if !self.is_selectable_id(anchor) {
+                self.selection.anchor_id = self.selection.selected_ids.iter().next().copied();
+            }
+        }
+
+        for idx in 0..self.thumbnails.row_count() {
+            if let Some(mut thumb) = self.thumbnails.row_data(idx) {
+                let is_selected = self.selection.selected_ids.contains(&thumb.id);
+                if thumb.selected != is_selected {
+                    thumb.selected = is_selected;
+                    self.thumbnails.set_row_data(idx, thumb);
+                }
+            }
+        }
+    }
+
+    fn rebuild_checked_paths(&self) {
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+        for idx in 0..self.thumbnails.row_count() {
+            if let Some(thumb) = self.thumbnails.row_data(idx) {
+                if thumb.checked && thumb.selectable && seen.insert(thumb.path.clone()) {
+                    paths.push(thumb.path);
+                }
+            }
+        }
+        self.selected_paths.set_vec(paths);
     }
 }
 
@@ -601,21 +681,6 @@ fn placeholder_image() -> slint::Image {
     let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(1, 1);
     buf.make_mut_bytes().fill(0);
     slint::Image::from_rgba8(buf)
-}
-
-fn rebuild_selected_paths(
-    thumbnails: &Rc<VecModel<ImageThumbnail>>,
-    selected: &Rc<VecModel<SharedString>>,
-) {
-    let mut paths = Vec::new();
-    for idx in 0..thumbnails.row_count() {
-        if let Some(thumb) = thumbnails.row_data(idx) {
-            if thumb.selected {
-                paths.push(thumb.path.clone());
-            }
-        }
-    }
-    selected.set_vec(paths);
 }
 
 fn refresh_directory_model(model: &Rc<VecModel<SharedString>>, base: &Path) {
@@ -632,34 +697,137 @@ fn refresh_directory_model(model: &Rc<VecModel<SharedString>>, base: &Path) {
     model.set_vec(entries);
 }
 
-fn toggle_thumbnail_selection(state: &Rc<RefCell<ImportViewState>>, path: &str, selected: bool) {
-    let guard = state.borrow_mut();
-    for idx in 0..guard.thumbnails.row_count() {
-        if let Some(mut thumb) = guard.thumbnails.row_data(idx) {
-            if thumb.path.as_str() == path {
-                thumb.selected = selected;
-                guard.thumbnails.set_row_data(idx, thumb);
-                break;
+fn select_single(state: &Rc<RefCell<ImportViewState>>, id: ImageId) {
+    let mut guard = state.borrow_mut();
+    if !guard.is_selectable_id(id) {
+        return;
+    }
+    guard.selection.selected_ids.clear();
+    guard.selection.selected_ids.insert(id);
+    guard.selection.anchor_id = Some(id);
+    guard.apply_selection_flags();
+}
+
+fn select_range(state: &Rc<RefCell<ImportViewState>>, id: ImageId) {
+    let mut guard = state.borrow_mut();
+    if !guard.is_selectable_id(id) {
+        return;
+    }
+
+    let Some(anchor) = guard.selection.anchor_id else {
+        guard.selection.selected_ids.clear();
+        guard.selection.selected_ids.insert(id);
+        guard.selection.anchor_id = Some(id);
+        guard.apply_selection_flags();
+        return;
+    };
+
+    let Some(anchor_idx) = guard.index_of(anchor) else {
+        guard.selection.selected_ids.clear();
+        guard.selection.selected_ids.insert(id);
+        guard.selection.anchor_id = Some(id);
+        guard.apply_selection_flags();
+        return;
+    };
+
+    let Some(target_idx) = guard.index_of(id) else {
+        return;
+    };
+
+    let (start, end) = if anchor_idx <= target_idx {
+        (anchor_idx, target_idx)
+    } else {
+        (target_idx, anchor_idx)
+    };
+
+    guard.selection.selected_ids.clear();
+    for idx in start..=end {
+        if let Some(thumb) = guard.thumbnails.row_data(idx) {
+            if thumb.selectable {
+                guard.selection.selected_ids.insert(thumb.id);
             }
         }
     }
-    rebuild_selected_paths(&guard.thumbnails, &guard.selected_paths);
+    guard.selection.anchor_id = Some(id);
+    guard.apply_selection_flags();
 }
 
-fn set_all_selection(state: &Rc<RefCell<ImportViewState>>, selected: bool) {
+fn toggle_single(state: &Rc<RefCell<ImportViewState>>, id: ImageId) {
+    let mut guard = state.borrow_mut();
+    if !guard.is_selectable_id(id) {
+        return;
+    }
+
+    if !guard.selection.selected_ids.remove(&id) {
+        guard.selection.selected_ids.insert(id);
+    }
+    guard.apply_selection_flags();
+}
+
+fn select_all_allowed(state: &Rc<RefCell<ImportViewState>>) {
+    let mut guard = state.borrow_mut();
+    guard.selection.selected_ids.clear();
+    let mut anchor: Option<ImageId> = None;
+    for idx in 0..guard.thumbnails.row_count() {
+        if let Some(thumb) = guard.thumbnails.row_data(idx) {
+            if thumb.selectable {
+                guard.selection.selected_ids.insert(thumb.id);
+                if anchor.is_none() {
+                    anchor = Some(thumb.id);
+                }
+            }
+        }
+    }
+    guard.selection.anchor_id = anchor;
+    guard.apply_selection_flags();
+}
+
+fn clear_selection(state: &Rc<RefCell<ImportViewState>>) {
+    let mut guard = state.borrow_mut();
+    guard.selection.selected_ids.clear();
+    guard.apply_selection_flags();
+}
+
+fn set_all_checked(state: &Rc<RefCell<ImportViewState>>, checked: bool) {
     let guard = state.borrow_mut();
     for idx in 0..guard.thumbnails.row_count() {
         if let Some(mut thumb) = guard.thumbnails.row_data(idx) {
-            thumb.selected = selected;
-            guard.thumbnails.set_row_data(idx, thumb);
+            if thumb.selectable {
+                thumb.checked = checked;
+                guard.thumbnails.set_row_data(idx, thumb);
+            }
         }
     }
-    rebuild_selected_paths(&guard.thumbnails, &guard.selected_paths);
+    guard.rebuild_checked_paths();
+}
+
+fn apply_checkbox_to_selection(state: &Rc<RefCell<ImportViewState>>, checked: bool) {
+    let mut guard = state.borrow_mut();
+    if guard.selection.selected_ids.is_empty() {
+        if let Some(anchor) = guard.selection.anchor_id {
+            if guard.is_selectable_id(anchor) {
+                guard.selection.selected_ids.insert(anchor);
+            }
+        }
+    }
+
+    guard.apply_selection_flags();
+
+    for idx in 0..guard.thumbnails.row_count() {
+        if let Some(mut thumb) = guard.thumbnails.row_data(idx) {
+            if guard.selection.selected_ids.contains(&thumb.id) && thumb.selectable {
+                thumb.checked = checked;
+                guard.thumbnails.set_row_data(idx, thumb);
+            }
+        }
+    }
+    guard.rebuild_checked_paths();
 }
 
 fn start_scan_for_directory(
     import_ui: &slint::Weak<ImportPhotosScreen>,
     state: &Rc<RefCell<ImportViewState>>,
+    catalog_path: PathBuf,
     path: PathBuf,
 ) {
     if !path.exists() {
@@ -682,22 +850,65 @@ fn start_scan_for_directory(
         ui.set_progress(0.0);
     }
 
+    let db_path = catalog_path.to_string_lossy().to_string();
+    let catalog_for_scan = CatalogDb::open(&db_path)
+        .map(CatalogService::new)
+        .map(Rc::new)
+        .map_err(|err| {
+            if let Some(ui) = import_ui.upgrade() {
+                ui.set_status_text(format!("Unable to check duplicates: {err}").into());
+            }
+            err
+        })
+        .ok();
+
     let cancel_flag = { state.borrow().scan_cancel.clone() };
     let state_for_candidates = state.clone();
     let ui_weak = import_ui.clone();
+    let seen = Rc::new(RefCell::new(HashSet::<PathBuf>::new()));
     let scan_opts = ScanOptions {
-        on_candidate: Some(Arc::new(move |candidate| {
-            let guard = state_for_candidates.borrow_mut();
-            let display_thumb = candidate.thumb.unwrap_or_else(placeholder_image);
-            let path_text: SharedString = candidate.path.to_string_lossy().to_string().into();
-            guard.thumbnails.push(ImageThumbnail {
-                path: path_text.clone(),
-                display_thumb,
-                selected: true,
-            });
-            guard.selected_paths.push(path_text);
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_status_text(format!("Queued {}", candidate.path.display()).into());
+        on_candidate: Some(Arc::new({
+            let seen = seen.clone();
+            let catalog_for_scan = catalog_for_scan.clone();
+            move |candidate| {
+                if !seen.borrow_mut().insert(candidate.path.clone()) {
+                    return;
+                }
+
+                let already_imported = catalog_for_scan
+                    .as_ref()
+                    .map(|svc| is_already_imported(svc, &candidate.path))
+                    .unwrap_or(false);
+                let selectable = !already_imported;
+                let checked = selectable;
+                let display_thumb = candidate.thumb.unwrap_or_else(placeholder_image);
+                let path_text: SharedString = candidate.path.to_string_lossy().to_string().into();
+
+                let mut guard = state_for_candidates.borrow_mut();
+                let id = guard.next_image_id;
+                guard.next_image_id += 1;
+
+                if selectable && guard.selection.selected_ids.is_empty() {
+                    guard.selection.selected_ids.insert(id);
+                    guard.selection.anchor_id = Some(id);
+                }
+
+                let is_selected = guard.selection.selected_ids.contains(&id);
+
+                guard.thumbnails.push(ImportThumbnail {
+                    id,
+                    path: path_text.clone(),
+                    display_thumb,
+                    selected: is_selected,
+                    checked,
+                    already_imported,
+                    selectable,
+                });
+                guard.apply_selection_flags();
+                guard.rebuild_checked_paths();
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_status_text(format!("Queued {}", candidate.path.display()).into());
+                }
             }
         })),
         cancel: cancel_flag.clone(),
@@ -713,10 +924,9 @@ fn start_scan_for_directory(
                 Err(err) => ui.set_status_text(format!("Scan failed: {err}").into()),
             }
         }
-        rebuild_selected_paths(
-            &state_done.borrow().thumbnails,
-            &state_done.borrow().selected_paths,
-        );
+        let mut guard = state_done.borrow_mut();
+        guard.apply_selection_flags();
+        guard.rebuild_checked_paths();
     });
 }
 
@@ -923,14 +1133,17 @@ fn launch_import_flow(
     {
         let import_ui_weak = import_ui_weak.clone();
         let view_state = view_state.clone();
+        let catalog_path = catalog_path.clone();
         import_ui.on_browse_for_directory(move || {
             let import_ui_weak = import_ui_weak.clone();
             let view_state = view_state.clone();
+            let catalog_path = catalog_path.clone();
             let _ = slint::spawn_local(async move {
                 if let Some(handle) = AsyncFileDialog::new().pick_folder().await {
                     start_scan_for_directory(
                         &import_ui_weak,
                         &view_state,
+                        catalog_path.clone(),
                         handle.path().to_path_buf(),
                     );
                 }
@@ -941,8 +1154,14 @@ fn launch_import_flow(
     {
         let import_ui_weak = import_ui_weak.clone();
         let view_state = view_state.clone();
+        let catalog_path = catalog_path.clone();
         import_ui.on_directory_selected(move |path| {
-            start_scan_for_directory(&import_ui_weak, &view_state, PathBuf::from(path.as_str()));
+            start_scan_for_directory(
+                &import_ui_weak,
+                &view_state,
+                catalog_path.clone(),
+                PathBuf::from(path.as_str()),
+            );
         });
     }
 
@@ -965,14 +1184,41 @@ fn launch_import_flow(
     {
         let view_state = view_state.clone();
         import_ui.on_select_all_requested(move |all_selected| {
-            set_all_selection(&view_state, all_selected);
+            set_all_checked(&view_state, all_selected);
         });
     }
 
     {
         let view_state = view_state.clone();
-        import_ui.on_thumbnail_toggled(move |path, selected| {
-            toggle_thumbnail_selection(&view_state, &path, selected);
+        import_ui.on_thumbnail_clicked(move |image_id, shift, ctrl| {
+            if shift {
+                select_range(&view_state, image_id);
+            } else if ctrl {
+                toggle_single(&view_state, image_id);
+            } else {
+                select_single(&view_state, image_id);
+            }
+        });
+    }
+
+    {
+        let view_state = view_state.clone();
+        import_ui.on_checkbox_clicked(move |checked| {
+            apply_checkbox_to_selection(&view_state, checked);
+        });
+    }
+
+    {
+        let view_state = view_state.clone();
+        import_ui.on_keyboard_select_all(move || {
+            select_all_allowed(&view_state);
+        });
+    }
+
+    {
+        let view_state = view_state.clone();
+        import_ui.on_keyboard_clear_selection(move || {
+            clear_selection(&view_state);
         });
     }
 
@@ -1004,7 +1250,14 @@ fn launch_import_flow(
                     .upgrade()
                     .map(|ui| ui.get_allow_duplicates())
                     .unwrap_or(false);
-                let files: Vec<PathBuf> = paths.iter().map(|p| PathBuf::from(p.as_str())).collect();
+                let mut seen_files = HashSet::new();
+                let mut files: Vec<PathBuf> = Vec::new();
+                for p in paths.iter() {
+                    let path_buf = PathBuf::from(p.as_str());
+                    if seen_files.insert(path_buf.clone()) {
+                        files.push(path_buf);
+                    }
+                }
                 let keywords = parse_keywords(keyword_text.as_str());
                 let method = match method_str.as_str() {
                     "Copy" => ImportMethod::Copy,
