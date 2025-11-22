@@ -1,5 +1,6 @@
 pub mod db;
 pub mod schema;
+pub mod services;
 
 use app_settings::AppSettings;
 use chrono::{DateTime, Utc};
