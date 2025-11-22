@@ -1,3 +1,4 @@
+use crate::db::DbResult;
 use crate::schema::initialize_schema;
 use rusqlite::{Connection, Transaction};
 
@@ -9,13 +10,13 @@ pub struct CatalogDb {
 }
 
 impl CatalogDb {
-    pub fn open(path: &str) -> rusqlite::Result<Self> {
+    pub fn open(path: &str) -> DbResult<Self> {
         let conn = Connection::open(path)?;
         initialize_schema(&conn)?;
         Ok(Self { conn })
     }
 
-    pub fn in_memory() -> rusqlite::Result<Self> {
+    pub fn in_memory() -> DbResult<Self> {
         let conn = Connection::open_in_memory()?;
         initialize_schema(&conn)?;
         Ok(Self { conn })

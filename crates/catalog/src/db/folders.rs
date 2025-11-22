@@ -1,4 +1,6 @@
-use crate::db::{parse_datetime, query_all, query_one, query_optional, to_rfc3339, DbHandle, DbResult};
+use crate::db::{
+    parse_datetime, query_all, query_one, query_optional, to_rfc3339, DbHandle, DbResult,
+};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use rusqlite::params;

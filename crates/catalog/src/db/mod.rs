@@ -16,6 +16,7 @@ pub mod folders;
 pub mod image_keywords;
 pub mod images;
 pub mod keywords;
+pub mod migrations;
 pub mod previews;
 pub mod thumbnails;
 
@@ -29,6 +30,7 @@ pub use folders::Folder;
 pub use image_keywords::ImageKeyword;
 pub use images::Image;
 pub use keywords::Keyword;
+pub use migrations::{Migration, MIGRATIONS};
 pub use previews::Preview;
 pub use thumbnails::Thumbnail;
 
