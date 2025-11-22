@@ -1,3 +1,5 @@
+pub mod schema;
+
 use app_settings::AppSettings;
 use chrono::{DateTime, Utc};
 use core_types::ImageFlags;
