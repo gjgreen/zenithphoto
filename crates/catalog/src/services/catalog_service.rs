@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use blake3::Hasher;
 use chrono::{DateTime, Utc};
+use image::{DynamicImage, ImageOutputFormat};
 use rusqlite::params;
 use serde_json::Value;
 
@@ -31,6 +34,13 @@ impl CatalogService {
             .with_context(|| format!("failed to read file metadata for {:?}", path))?;
         let folder_path = Self::parent_path(path);
         let folder = self.ensure_folder(&folder_path)?;
+        let file_hash = Self::compute_file_hash(path)
+            .with_context(|| format!("failed to hash file {:?}", path))?;
+
+        let metadata_json = match self.extract_exif_metadata(path)? {
+            Some(json) => Some(json),
+            None => self.scan_raw_metadata(path)?,
+        };
 
         let filename = path
             .file_name()
@@ -47,7 +57,7 @@ impl CatalogService {
             sidecar_path: None,
             sidecar_hash: None,
             filesize: Some(metadata.len() as i64),
-            file_hash: None,
+            file_hash: Some(file_hash),
             file_modified_at: Self::modified_time(&metadata),
             imported_at: now,
             captured_at: None,
@@ -65,7 +75,7 @@ impl CatalogService {
             rating: None,
             flag: None,
             color_label: None,
-            metadata_json: self.extract_exif_metadata(path)?,
+            metadata_json,
             created_at: now,
             updated_at: now,
         };
@@ -333,6 +343,55 @@ impl CatalogService {
         })
     }
 
+    /// Generate and persist thumbnails for an image. Returns `None` when decoding fails,
+    /// allowing callers to continue importing while recording the original path.
+    pub fn generate_thumbnail(&self, image_id: i64, path: &Path) -> Result<Option<Thumbnail>> {
+        match Self::load_image_for_thumbnail(path) {
+            Ok(img) => {
+                let thumb_256 =
+                    Self::thumbnail_bytes(&img, 256).context("failed to encode 256px thumbnail")?;
+                let thumb_1024 =
+                    Self::thumbnail_bytes(&img, 1024).context("failed to encode 1024px thumbnail")?;
+
+                let thumb =
+                    self.upsert_thumbnail(image_id, Some(thumb_256), Some(thumb_1024))?;
+                Ok(Some(thumb))
+            }
+            Err(err) => {
+                eprintln!("Thumbnail decode failed for {:?}: {err}", path);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Placeholder for future RAW/sidecar parsing.
+    pub fn scan_raw_metadata(&self, _path: &Path) -> Result<Option<Value>> {
+        // TODO: Plug in RAW parsers (cr2/nef/raf/arw) and surface metadata here.
+        Ok(None)
+    }
+
+    pub fn find_image_by_original_path(&self, path: &Path) -> Result<Option<Image>> {
+        query_optional(
+            &self.db,
+            "SELECT
+                id, folder_id, filename, original_path, sidecar_path, sidecar_hash, filesize,
+                file_hash, file_modified_at, imported_at, captured_at, camera_make,
+                camera_model, lens_model, focal_length, aperture, shutter_speed, iso,
+                orientation, gps_latitude, gps_longitude, gps_altitude, rating, flag,
+                color_label, metadata_json, created_at, updated_at
+             FROM images
+             WHERE original_path = ?1",
+            params![path.to_string_lossy()],
+            Image::from_row,
+        )
+        .with_context(|| format!("failed to check for existing image at {}", path.display()))
+    }
+
+    pub fn find_image_by_hash(&self, hash: &str) -> Result<Option<Image>> {
+        Image::find_by_hash(&self.db, hash)
+            .with_context(|| format!("failed to check for existing image hash={hash}"))
+    }
+
     fn ensure_folder(&self, path: &Path) -> Result<Folder> {
         let path_str = path.to_string_lossy().to_string();
         if let Some(existing) = Folder::find_by_path(&self.db, &path_str)? {
@@ -348,6 +407,39 @@ impl CatalogService {
         };
         let id = folder.insert(&self.db)?;
         Ok(Folder { id, ..folder })
+    }
+
+    pub fn compute_file_hash(path: &Path) -> Result<String> {
+        let mut file = fs::File::open(path)
+            .with_context(|| format!("failed to open file for hashing: {:?}", path))?;
+        let mut hasher = Hasher::new();
+        let mut buf = [0u8; 8192];
+
+        loop {
+            let read = file.read(&mut buf)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buf[..read]);
+        }
+
+        Ok(hasher.finalize().to_hex().to_string())
+    }
+
+    fn load_image_for_thumbnail(path: &Path) -> Result<DynamicImage> {
+        image::open(path).with_context(|| format!("failed to decode image {:?}", path))
+    }
+
+    fn thumbnail_bytes(img: &DynamicImage, max_dim: u32) -> Result<Vec<u8>> {
+        let thumb = img.thumbnail(max_dim, max_dim);
+        let mut out = Vec::new();
+        {
+            let mut cursor = Cursor::new(&mut out);
+            thumb
+                .write_to(&mut cursor, ImageOutputFormat::Png)
+                .context("failed to encode thumbnail as PNG")?;
+        }
+        Ok(out)
     }
 
     fn extract_exif_metadata(&self, _path: &Path) -> Result<Option<Value>> {

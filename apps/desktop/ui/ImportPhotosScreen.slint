@@ -1,0 +1,315 @@
+import { Button, CheckBox, ComboBox, ProgressIndicator, ScrollView, TextEdit } from "std-widgets.slint";
+
+export struct ImageThumbnail {
+    path: string,
+    display_thumb: image,
+    selected: bool,
+}
+
+export component ImportPhotosScreen inherits Window {
+    width: 1400px;
+    height: 900px;
+    title: "Import Photos";
+
+    in-out property <[ImageThumbnail]> thumbnails;
+    in-out property <[string]> directories;
+    in-out property <[string]> selected_paths;
+    in-out property <[string]> error_messages;
+    in-out property <string> selected_directory;
+    in-out property <string> destination_directory;
+    in-out property <string> keywords;
+    in-out property <bool> allow_duplicates: false;
+    in-out property <bool> show_destination: false;
+    in-out property <bool> importing: false;
+    in-out property <float> progress: 0.0;
+    in-out property <string> status_text;
+
+    callback directory_selected(path: string);
+    callback browse_for_directory();
+    callback browse_for_destination();
+    callback thumbnail_toggled(path: string, selected: bool);
+    callback select_all_requested(all_selected: bool);
+    callback perform_import(
+        source_directory: string,
+        destination_directory: string,
+        file_paths: [string],
+        keywords: string,
+        method: string
+    );
+    callback cancel_import;
+
+    property <int> grid_columns: 4;
+    in-out property <string> current_method: "Add";
+
+    changed current_method => {
+        show_destination = current_method != "Add";
+    }
+
+    Rectangle {
+        background: #101010;
+        width: parent.width;
+        height: parent.height;
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 12px;
+
+            // Main panels
+            HorizontalLayout {
+                spacing: 12px;
+                vertical-stretch: 1;
+
+                // Left: directory browser
+                Rectangle {
+                    width: 260px;
+                    background: #181818;
+                    border-radius: 6px;
+                    HorizontalLayout {
+                        padding: 8px;
+                        VerticalLayout {
+                            spacing: 8px;
+                            Text { text: "Folders"; font-weight: 600; }
+                            Button {
+                                text: "Choose Folder…";
+                                enabled: !root.importing;
+                                clicked => { root.browse_for_directory(); }
+                            }
+                            Text {
+                                text: root.selected_directory;
+                                wrap: word-wrap;
+                                font-size: 10px;
+                                color: #c0c0c0;
+                            }
+                            ScrollView {
+                                vertical-stretch: 1;
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    vertical-stretch: 1;
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        for dir_path[idx] in root.directories: Button {
+                                            text: dir_path;
+                                            horizontal-stretch: 1;
+                                            enabled: !root.importing;
+                                            clicked => {
+                                                root.selected_directory = dir_path;
+                                                root.directory_selected(dir_path);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Center: thumbnails grid
+                Rectangle {
+                    background: #161616;
+                    border-radius: 6px;
+                    horizontal-stretch: 1;
+                    ScrollView {
+                        padding: 8px;
+                        VerticalLayout {
+                            spacing: 8px;
+
+                            for thumb[idx] in root.thumbnails: Rectangle {
+                                background: thumb.selected ? #2e5bff40 : #222222;
+                                border-radius: 4px;
+                                preferred-height: 180px;
+
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    padding: 6px;
+                                    Rectangle {
+                                        background: #101010;
+                                        border-radius: 4px;
+                                        horizontal-stretch: 1;
+                                        height: 120px;
+                                        Image {
+                                            source: thumb.display_thumb;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            image-fit: cover;
+                                        }
+                                    }
+                                    Text {
+                                        text: thumb.path;
+                                        font-size: 10px;
+                                        wrap: word-wrap;
+                                    }
+                                    CheckBox {
+                                        text: thumb.selected ? "Selected" : "Tap to include";
+                                        checked: thumb.selected;
+                                        enabled: !root.importing;
+                                        toggled => {
+                                            root.thumbnails[idx].selected = !thumb.selected;
+                                            root.thumbnail_toggled(thumb.path, !thumb.selected);
+                                        }
+                                    }
+                                }
+
+                                TouchArea {
+                                    clicked => {
+                                        root.thumbnails[idx].selected = !thumb.selected;
+                                        root.thumbnail_toggled(thumb.path, !thumb.selected);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Right: destination picker
+                Rectangle {
+                    width: 280px;
+                    visible: root.show_destination;
+                    background: #181818;
+                    border-radius: 6px;
+                    HorizontalLayout {
+                        padding: 8px;
+                        VerticalLayout {
+                            spacing: 8px;
+                            Text { text: "Destination"; font-weight: 600; }
+                            Button {
+                                text: "Choose Destination…";
+                                enabled: !root.importing;
+                                clicked => root.browse_for_destination();
+                            }
+                            Text {
+                                text: root.destination_directory;
+                                wrap: word-wrap;
+                                font-size: 10px;
+                                color: #c0c0c0;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Keywords entry
+            Rectangle {
+                background: #181818;
+                border-radius: 6px;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    Text { text: "Keywords (comma-separated)"; font-weight: 600; }
+                    TextEdit {
+                        text <=> root.keywords;
+                        wrap: word-wrap;
+                        read-only: root.importing;
+                        vertical-stretch: 1;
+                    }
+                }
+            }
+
+            // Footer controls
+            Rectangle {
+                height: 90px;
+                background: #121212;
+                border-radius: 6px;
+                HorizontalLayout {
+                    padding: 10px;
+                    spacing: 12px;
+                    VerticalLayout {
+                        width: 320px;
+                        spacing: 8px;
+                        ComboBox {
+                            enabled: !root.importing;
+                            model: ["Add", "Copy", "Move"];
+                            current-value: root.current_method;
+                            selected(current-value) => {
+                                root.current_method = current-value;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            CheckBox {
+                                text: "Select / Deselect All";
+                                enabled: !root.importing;
+                                toggled => {
+                                    root.select_all_requested(self.checked);
+                                }
+                            }
+                            CheckBox {
+                                text: "Import duplicates";
+                                enabled: !root.importing;
+                                checked <=> root.allow_duplicates;
+                            }
+                            Text {
+                                text: "Selected " + root.selected_paths.length + " / " + root.thumbnails.length;
+                                font-size: 11px;
+                                color: #c0c0c0;
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        horizontal-stretch: 1;
+                        ProgressIndicator {
+                            visible: root.importing;
+                            indeterminate: root.progress <= 0;
+                            progress: min(max(root.progress, 0.0), 1.0);
+                        }
+                        Rectangle {
+                            height: 6px;
+                            horizontal-stretch: 1;
+                            background: #1f1f1f;
+                            border-radius: 3px;
+                            Rectangle {
+                                background: #3b82f6;
+                                border-radius: 3px;
+                                width: parent.width * min(max(root.progress, 0.0), 1.0);
+                                height: parent.height;
+                            }
+                        }
+                        Text {
+                            text: root.status_text;
+                            wrap: word-wrap;
+                            color: #d0d0d0;
+                        }
+                        if root.error_messages.length > 0: ScrollView {
+                            height: 60px;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    for msg in root.error_messages: Text {
+                                        text: "⚠ " + msg;
+                                        color: #f09b4c;
+                                        wrap: word-wrap;
+                                        font-size: 11px;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: "Cancel";
+                            enabled: true;
+                            clicked => root.cancel_import();
+                        }
+                        Button {
+                            text: "Import";
+                            enabled: !root.importing && root.selected_paths.length > 0;
+                            clicked => {
+                                root.perform_import(
+                                    root.selected_directory,
+                                    root.destination_directory,
+                                    root.selected_paths,
+                                    root.keywords,
+                                    root.current_method,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

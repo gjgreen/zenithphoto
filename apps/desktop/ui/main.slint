@@ -1,6 +1,7 @@
 import { CatalogDialog } from "catalog_dialog.slint";
+import { ImportPhotosScreen } from "ImportPhotosScreen.slint";
 import { Button, Slider } from "std-widgets.slint";
-export { CatalogDialog }
+export { CatalogDialog, ImportPhotosScreen }
 
 export component MainWindow inherits Window {
     width: 1400px;
@@ -10,12 +11,14 @@ export component MainWindow inherits Window {
     in-out property <image> preview_image;
     in-out property <string> current-path;
     in-out property <[string]> recent-catalogs;
+    in-out property <string> status-text;
 
     callback open-image-request();
     callback new-catalog-requested();
     callback open-catalog-requested();
     callback open-recent-catalog-requested(path: string);
     callback clear-recent-catalogs-requested();
+    callback import-photos-requested();
     callback exit-requested();
 
     forward-focus: shortcuts;
@@ -57,7 +60,10 @@ export component MainWindow inherits Window {
                 }
             }
 
-            MenuSeparator { }
+            MenuItem {
+                title: "Import Photos…";
+                activated => root.import-photos-requested();
+            }
 
             MenuItem {
                 title: "Exit";
@@ -78,6 +84,11 @@ export component MainWindow inherits Window {
 
             if (event.modifiers.control && (event.text == "q" || event.text == "Q")) {
                 root.exit-requested();
+                return accept;
+            }
+
+            if ((event.modifiers.control || event.modifiers.meta) && (event.text == "i" || event.text == "I")) {
+                root.import-photos-requested();
                 return accept;
             }
 
@@ -111,6 +122,12 @@ export component MainWindow inherits Window {
                     wrap: word-wrap;
                     font-size: 10px;
                     color: #bbbbbb;
+                }
+                if root.status-text != "": Text {
+                    text: root.status-text;
+                    wrap: word-wrap;
+                    font-size: 10px;
+                    color: #8fb3ff;
                 }
             }
 
