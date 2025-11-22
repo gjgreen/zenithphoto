@@ -10,10 +10,6 @@ pub enum AppSettingsError {
     #[error("Settings parse error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[cfg(target_os = "windows")]
-    #[error("Registry error: {0}")]
-    Registry(#[from] winreg::Error),
-
     #[error("Settings path unavailable")]
     MissingSettingsPath,
 }
@@ -54,8 +50,7 @@ fn load_impl() -> Result<AppSettings> {
         .ok();
 
     if let Some(key) = key {
-        let last: Result<String, _> = key.get_value("LastCatalog");
-        if let Ok(path) = last {
+        if let Ok(path) = key.get_value::<String, _>("LastCatalog") {
             return Ok(AppSettings {
                 last_catalog: Some(PathBuf::from(path)),
             });

@@ -11,6 +11,13 @@ core-types = { path = "../../core-types" }
 catalog = { path = "../../crates/catalog" }
 app-settings = { path = "../../crates/app-settings" }
 rfd = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+directories = "5.0"
+thiserror = "1.0"
 
 [build-dependencies]
 slint-build = "1.8"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
