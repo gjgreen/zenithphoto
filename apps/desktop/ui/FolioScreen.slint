@@ -77,42 +77,50 @@ component ThumbnailCard inherits Rectangle {
     in property <int> rating: 0;
     in property <string> flag: "";
     in property <string> color-label: "";
+    in property <length> thumb-size: 200px;
+    in property <length> card-width: 216px;
+    in property <length> card-height: 272px;
     callback clicked(range_select: bool, toggle: bool);
     callback activated;
 
-    preferred-height: 200px;
-    border-radius: 6px;
-    background: selected ? #2040a0aa : #1c1c1c;
-    border-width: selected ? 1px : 0px;
-    border-color: #3b82f6;
+    width: card-width;
+    height: card-height;
+    preferred-width: card-width;
+    preferred-height: card-height;
+    border-radius: 8px;
+    background: selected ? #1f3a70 : touch_area.has-hover ? #181818 : #141414;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? #3a6dff : #444;
+    clip: true;
+
+    animate background, border-color { duration: 120ms; }
 
     VerticalLayout {
-        padding: 8px;
-        spacing: 6px;
+        padding: 10px;
+        spacing: 8px;
+        width: parent.width;
+        height: parent.height;
 
         Rectangle {
             background: #0a0a0a;
-            border-radius: 4px;
-            height: 140px;
+            border-radius: 6px;
+            height: root.thumb-size;
+            width: parent.width - 4px;
             Image {
                 source: thumbnail;
                 width: parent.width;
                 height: parent.height;
-                image-fit: cover;
+                image-fit: contain;
+                image-rendering: smooth;
             }
         }
 
-        Text {
-            text: path;
-            font-size: 10px;
-            wrap: word-wrap;
-            color: #c0c0c0;
-        }
+        Text { text: path; font-size: 11px; wrap: no-wrap; overflow: elide; color: #d0d0d0; }
 
         HorizontalLayout {
             spacing: 6px;
-            Text { text: rating > 0 ? ("★" + rating) : "Unrated"; font-size: 10px; color: #f1c40f; }
-            if flag != "": Text { text: flag; font-size: 10px; color: #76ff7a; }
+            Text { text: rating > 0 ? ("★ " + rating) : "Unrated"; font-size: 10px; color: #f1c40f; wrap: no-wrap; }
+            if flag != "": Text { text: flag; font-size: 10px; color: flag == "rejected" ? #ef4444 : #76ff7a; wrap: no-wrap; }
             if color-label != "": Rectangle {
                 width: 12px; height: 12px; border-radius: 2px;
                 background: FolioTheme.label_color(color-label);
@@ -120,7 +128,9 @@ component ThumbnailCard inherits Rectangle {
         }
     }
 
-    TouchArea {
+    touch_area := TouchArea {
+        width: parent.width;
+        height: parent.height;
         double-clicked => activated();
         pointer-event(event) => {
             if (event.kind == PointerEventKind.up) {
@@ -162,6 +172,12 @@ export component FolioScreen inherits Rectangle {
     callback update_color_label(image_id: int, label: string);
     callback update_keywords(image_id: int, keywords: string);
     callback filters_changed(search: string, rating: int, flag: string, color_label: string);
+
+    property <length> thumbnail-size: 200px;
+    property <length> thumbnail-gap: 12px;
+    property <length> thumbnail-grid-padding: 10px;
+    property <length> thumbnail-card-width: root.thumbnail-size + 16px;
+    property <length> thumbnail-card-height: root.thumbnail-size + 72px;
 
     background: #0f0f0f;
 
@@ -295,12 +311,40 @@ export component FolioScreen inherits Rectangle {
                     }
                 }
 
-                ScrollView {
+                thumbnail_scroll := ScrollView {
                     vertical-stretch: 1;
-                    VerticalLayout {
-                        spacing: 8px;
+                    viewport-width: grid_container.width;
+                    viewport-height: grid_container.height;
+
+                    grid_container := Rectangle {
+                        property <float> columns: {
+                            let available = thumbnail_scroll.visible-width - root.thumbnail-grid-padding * 2;
+                            let cell = root.thumbnail-card-width + root.thumbnail-gap;
+                            let count = Math.floor(available / cell);
+                            count < 1 ? 1 : count;
+                        }
+                        property <float> rows: {
+                            let total = root.thumbnails.length;
+                            if total == 0 { 1 } else { Math.ceil(total / self.columns) }
+                        }
+                        property <length> content-width: root.thumbnail-grid-padding * 2
+                            + self.columns * root.thumbnail-card-width
+                            + (self.columns - 1) * root.thumbnail-gap;
+                        property <length> content-height: root.thumbnail-grid-padding * 2
+                            + self.rows * root.thumbnail-card-height
+                            + (self.rows - 1) * root.thumbnail-gap;
+
+                        width: self.content-width > thumbnail_scroll.visible-width ? self.content-width : thumbnail_scroll.visible-width;
+                        height: self.content-height;
 
                         for thumb[idx] in root.thumbnails: ThumbnailCard {
+                            thumb-size: root.thumbnail-size;
+                            card-width: root.thumbnail-card-width;
+                            card-height: root.thumbnail-card-height;
+
+                            x: root.thumbnail-grid-padding + Math.mod(idx, grid_container.columns) * (root.thumbnail-card-width + root.thumbnail-gap);
+                            y: root.thumbnail-grid-padding + Math.floor(idx / grid_container.columns) * (root.thumbnail-card-height + root.thumbnail-gap);
+
                             item-id: thumb.id;
                             path: thumb.path;
                             thumbnail: thumb.display_thumb;

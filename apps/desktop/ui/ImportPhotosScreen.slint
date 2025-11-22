@@ -6,6 +6,76 @@ export struct ImageThumbnail {
     selected: bool,
 }
 
+component ImportThumbnailCard inherits Rectangle {
+    in property <string> path;
+    in property <image> thumbnail;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    in property <length> thumb-size: 200px;
+    in property <length> card-width: 216px;
+    in property <length> card-height: 272px;
+    callback toggled(selected: bool);
+
+    width: card-width;
+    height: card-height;
+    preferred-width: card-width;
+    preferred-height: card-height;
+    border-radius: 8px;
+    background: selected ? #1f3a70 : touch_area.has-hover ? #1c1c1c : #141414;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? #3a6dff : #3a3a3a;
+    clip: true;
+
+    animate background, border-color { duration: 120ms; }
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        width: parent.width;
+        height: parent.height;
+
+        Rectangle {
+            background: #0f0f0f;
+            border-radius: 6px;
+            height: root.thumb-size;
+            width: parent.width - 4px;
+            Image {
+                source: thumbnail;
+                width: parent.width;
+                height: parent.height;
+                image-fit: contain;
+                image-rendering: smooth;
+            }
+        }
+
+        Text {
+            text: path;
+            font-size: 11px;
+            wrap: no-wrap;
+            overflow: elide;
+            color: #d0d0d0;
+        }
+
+        CheckBox {
+            text: selected ? "Selected" : "Tap to include";
+            checked: selected;
+            enabled: root.enabled;
+            toggled => {
+                toggled(self.checked);
+            }
+        }
+    }
+
+    touch_area := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.enabled;
+        clicked => {
+            toggled(!root.selected);
+        }
+    }
+}
+
 export component ImportPhotosScreen inherits Window {
     width: 1400px;
     height: 900px;
@@ -39,6 +109,11 @@ export component ImportPhotosScreen inherits Window {
     callback cancel_import;
 
     property <int> grid_columns: 4;
+    property <length> thumb_size: 200px;
+    property <length> thumb_gap: 12px;
+    property <length> thumb_padding: 10px;
+    property <length> card_width: root.thumb_size + 16px;
+    property <length> card_height: root.thumb_size + 72px;
     in-out property <string> current_method: "Add";
 
     changed current_method => {
@@ -108,51 +183,49 @@ export component ImportPhotosScreen inherits Window {
                     background: #161616;
                     border-radius: 6px;
                     horizontal-stretch: 1;
-                    ScrollView {
-                        VerticalLayout {
-                            padding: 8px;
-                            spacing: 8px;
+                    thumbnail_scroll := ScrollView {
+                        vertical-stretch: 1;
+                        viewport-width: grid_container.width;
+                        viewport-height: grid_container.height;
 
-                            for thumb[idx] in root.thumbnails: Rectangle {
-                                background: thumb.selected ? #2e5bff40 : #222222;
-                                border-radius: 4px;
-                                preferred-height: 180px;
+                        grid_container := Rectangle {
+                            property <float> columns: {
+                                let available = thumbnail_scroll.visible-width - root.thumb_padding * 2;
+                                let cell = root.card_width + root.thumb_gap;
+                                let count = Math.floor(available / cell);
+                                let min_cols = root.grid_columns;
+                                let chosen = count < 1 ? 1 : count;
+                                chosen < min_cols ? min_cols : chosen;
+                            }
+                            property <float> rows: {
+                                let total = root.thumbnails.length;
+                                if total == 0 { 1 } else { Math.ceil(total / self.columns) }
+                            }
+                            property <length> content-width: root.thumb_padding * 2
+                                + self.columns * root.card_width
+                                + (self.columns - 1) * root.thumb_gap;
+                            property <length> content-height: root.thumb_padding * 2
+                                + self.rows * root.card_height
+                                + (self.rows - 1) * root.thumb_gap;
 
-                                VerticalLayout {
-                                    spacing: 4px;
-                                    padding: 6px;
-                                    Rectangle {
-                                        background: #101010;
-                                        border-radius: 4px;
-                                        horizontal-stretch: 1;
-                                        height: 120px;
-                                        Image {
-                                            source: thumb.display_thumb;
-                                            width: parent.width;
-                                            height: parent.height;
-                                            image-fit: cover;
-                                        }
-                                    }
-                                    Text {
-                                        text: thumb.path;
-                                        font-size: 10px;
-                                        wrap: word-wrap;
-                                    }
-                                    CheckBox {
-                                        text: thumb.selected ? "Selected" : "Tap to include";
-                                        checked: thumb.selected;
-                                        enabled: !root.importing;
-                                        toggled => {
-                                            root.thumbnail_toggled(thumb.path, self.checked);
-                                        }
-                                    }
-                                }
+                            width: self.content-width > thumbnail_scroll.visible-width ? self.content-width : thumbnail_scroll.visible-width;
+                            height: self.content-height;
 
-                                TouchArea {
-                                    clicked => {
-                                        if (!root.importing) {
-                                            root.thumbnail_toggled(thumb.path, !thumb.selected);
-                                        }
+                            for thumb[idx] in root.thumbnails: ImportThumbnailCard {
+                                thumb-size: root.thumb_size;
+                                card-width: root.card_width;
+                                card-height: root.card_height;
+                                selected: thumb.selected;
+                                path: thumb.path;
+                                thumbnail: thumb.display_thumb;
+                                enabled: !root.importing;
+
+                                x: root.thumb_padding + Math.mod(idx, grid_container.columns) * (root.card_width + root.thumb_gap);
+                                y: root.thumb_padding + Math.floor(idx / grid_container.columns) * (root.card_height + root.thumb_gap);
+
+                                toggled(selected_state) => {
+                                    if (!root.importing) {
+                                        root.thumbnail_toggled(thumb.path, selected_state);
                                     }
                                 }
                             }

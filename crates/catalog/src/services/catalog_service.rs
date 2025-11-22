@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use blake3::Hasher;
 use chrono::{DateTime, Utc};
-use image::{DynamicImage, ImageOutputFormat};
+use image::imageops::{overlay, FilterType};
+use image::{DynamicImage, ImageOutputFormat, RgbaImage};
 use rusqlite::params;
 use serde_json::Value;
 
@@ -536,15 +537,30 @@ impl CatalogService {
     }
 
     fn thumbnail_bytes(img: &DynamicImage, max_dim: u32) -> Result<Vec<u8>> {
-        let thumb = img.thumbnail(max_dim, max_dim);
+        let thumb = Self::letterboxed_thumbnail(img, max_dim);
         let mut out = Vec::new();
         {
             let mut cursor = Cursor::new(&mut out);
-            thumb
+            DynamicImage::ImageRgba8(thumb)
                 .write_to(&mut cursor, ImageOutputFormat::Png)
                 .context("failed to encode thumbnail as PNG")?;
         }
         Ok(out)
+    }
+
+    fn letterboxed_thumbnail(img: &DynamicImage, max_dim: u32) -> RgbaImage {
+        let resized = img.resize(max_dim, max_dim, FilterType::Lanczos3).to_rgba8();
+        let (w, h) = resized.dimensions();
+        if w == max_dim && h == max_dim {
+            return resized;
+        }
+
+        let mut canvas =
+            RgbaImage::from_pixel(max_dim, max_dim, image::Rgba([16, 16, 16, 255]));
+        let offset_x = (max_dim - w) / 2;
+        let offset_y = (max_dim - h) / 2;
+        overlay(&mut canvas, &resized, offset_x.into(), offset_y.into());
+        canvas
     }
 
     fn extract_exif_metadata(&self, _path: &Path) -> Result<Option<Value>> {

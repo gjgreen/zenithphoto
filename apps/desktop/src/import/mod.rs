@@ -10,6 +10,8 @@ use catalog::services::CatalogService;
 use slint::{Image as SlintImage, Rgba8Pixel, SharedPixelBuffer};
 use walkdir::WalkDir;
 
+const THUMBNAIL_MAX_DIM: u32 = 256;
+
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "tiff", "tif", "jxl", "heif", "heic", "dng", "cr2", "nef", "raf", "arw",
 ];
@@ -345,10 +347,10 @@ fn copy_into_destination(src: &Path, dest_dir: &Path) -> Result<PathBuf> {
 
 fn decode_thumbnail(path: &Path) -> Option<SlintImage> {
     let dyn_img = image::open(path).ok()?;
-    let thumb = dyn_img.thumbnail(256, 256).to_rgba8();
+    let thumb = letterbox_thumbnail(&dyn_img, THUMBNAIL_MAX_DIM);
     let (w, h) = thumb.dimensions();
     let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
-    buf.make_mut_bytes().copy_from_slice(&thumb);
+    buf.make_mut_bytes().copy_from_slice(thumb.as_raw());
     Some(SlintImage::from_rgba8(buf))
 }
 
@@ -356,6 +358,23 @@ fn is_supported_extension(ext: &str) -> bool {
     SUPPORTED_EXTENSIONS
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+}
+
+fn letterbox_thumbnail(img: &image::DynamicImage, max_dim: u32) -> image::RgbaImage {
+    let resized = img
+        .resize(max_dim, max_dim, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    let (w, h) = resized.dimensions();
+    if w == max_dim && h == max_dim {
+        return resized;
+    }
+
+    let mut canvas =
+        image::RgbaImage::from_pixel(max_dim, max_dim, image::Rgba([16, 16, 16, 255]));
+    let offset_x = (max_dim - w) / 2;
+    let offset_y = (max_dim - h) / 2;
+    image::imageops::overlay(&mut canvas, &resized, offset_x.into(), offset_y.into());
+    canvas
 }
 
 #[cfg(test)]

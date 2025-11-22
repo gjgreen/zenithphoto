@@ -1337,11 +1337,29 @@ fn thumbnail_to_image(thumb: &Thumbnail) -> Option<slint::Image> {
 }
 
 fn decode_thumbnail(bytes: &[u8]) -> Option<slint::Image> {
-    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
-    let (width, height) = img.dimensions();
+    let img = image::load_from_memory(bytes).ok()?;
+    let thumb = fit_into_square(&img, 256);
+    let (width, height) = thumb.dimensions();
     let buffer =
-        SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(img.as_raw(), width, height);
+        SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(thumb.as_raw(), width, height);
     Some(slint::Image::from_rgba8(buffer))
+}
+
+fn fit_into_square(img: &image::DynamicImage, max_dim: u32) -> image::RgbaImage {
+    let resized = img
+        .resize(max_dim, max_dim, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    let (w, h) = resized.dimensions();
+    if w == max_dim && h == max_dim {
+        return resized;
+    }
+
+    let mut canvas =
+        image::RgbaImage::from_pixel(max_dim, max_dim, image::Rgba([16, 16, 16, 255]));
+    let offset_x = (max_dim - w) / 2;
+    let offset_y = (max_dim - h) / 2;
+    image::imageops::overlay(&mut canvas, &resized, offset_x.into(), offset_y.into());
+    canvas
 }
 
 fn handle_thumbnail_selection(
