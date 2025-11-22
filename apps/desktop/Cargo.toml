@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 build = "build.rs"
 
+[[bin]]
+name = "zenithphoto"
+path = "src/main.rs"
+
 [dependencies]
 slint = { version = "1.8", default-features = false, features = ["backend-winit", "renderer-femtovg", "compat-1-2"] }
 engine = { path = "../../crates/engine" }
