@@ -576,6 +576,7 @@ export component FolioScreen inherits Rectangle {
                         grid_container := Rectangle {
                             x: 0;
                             y: 0;
+                            background: #161616;
 
                             property <float> columns: {
                                 let available = grid_panel.inner_width - root.thumbnail-grid-padding * 2;
@@ -621,6 +622,14 @@ export component FolioScreen inherits Rectangle {
                                 activated => root.thumbnail_activated(thumb.id);
                             }
                         }
+
+                        Text {
+                            text: "grid: " + (grid_container.width / 1px) + "x" + (grid_container.height / 1px) + " cols=" + grid_container.columns + " rows=" + grid_container.rows;
+                            color: #888;
+                            font-size: 10px;
+                            x: 6px;
+                            y: 6px;
+                        }
                     }
                 }
 
@@ -638,7 +647,7 @@ export component FolioScreen inherits Rectangle {
                         Text { text: root.selected_count + " selected"; color: #c0c0c0; }
                         Text { text: root.size_summary; color: #a0a0a0; }
                         Rectangle { horizontal-stretch: 1; }
-                        Text { text: "telltale: scroll-fix v3"; color: #666; font-size: 10px; }
+                        Text { text: "telltale: scroll-fix v4"; color: #666; font-size: 10px; }
                     }
                 }
             }
