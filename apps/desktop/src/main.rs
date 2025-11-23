@@ -18,7 +18,7 @@ use import::{
 use rfd::{AsyncFileDialog, FileDialog};
 use slint::{Model, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -97,6 +97,7 @@ fn normalize_color_label_value(label: Option<&String>) -> String {
 
 struct FolioState {
     volumes: Rc<VecModel<VolumeNode>>,
+    volume_tree: Vec<VolumeTree>,
     virtual_collections: Rc<VecModel<VirtualCollectionItem>>,
     thumbnails: Rc<VecModel<ThumbnailItem>>,
     selection: Vec<i32>,
@@ -120,6 +121,7 @@ impl FolioState {
         ]));
         Self {
             volumes: Rc::new(VecModel::default()),
+            volume_tree: Vec::new(),
             virtual_collections,
             thumbnails: Rc::new(VecModel::default()),
             selection: Vec::new(),
@@ -138,6 +140,15 @@ impl FolioState {
     fn reset_selection(&mut self) {
         self.selection.clear();
         self.selection_anchor = None;
+    }
+
+    fn refresh_volume_models(&mut self) {
+        let flattened: Vec<VolumeNode> = self
+            .volume_tree
+            .iter()
+            .map(flatten_volume_tree)
+            .collect();
+        self.volumes.set_vec(flattened);
     }
 }
 
@@ -285,6 +296,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 &ui_weak,
                 &config_store,
             );
+        });
+    }
+
+    {
+        let ui_weak = ui_weak.clone();
+        let folio_state = folio_state.clone();
+        ui.on_folder_toggled(move |path| {
+            toggle_folder_expansion(path.as_str(), &folio_state, &ui_weak);
         });
     }
 
@@ -1576,33 +1595,157 @@ fn refresh_folio_tree(
         }
     };
 
-    let tree = build_volume_tree(&folders);
-    {
+    let expanded = {
         let guard = folio_state.borrow();
-        guard.volumes.set_vec(tree);
-    }
+        collect_expanded_state(&guard.volume_tree)
+    };
+
+    let tree = build_volume_tree(&folders, &expanded);
+    let volumes = {
+        let mut guard = folio_state.borrow_mut();
+        guard.volume_tree = tree;
+        guard.refresh_volume_models();
+        guard.volumes.clone()
+    };
 
     if let Some(ui) = ui_weak.upgrade() {
-        ui.set_volumes(folio_state.borrow().volumes.clone().into());
+        ui.set_volumes(volumes.into());
     }
 }
 
-fn build_volume_tree(folders: &[Folder]) -> Vec<VolumeNode> {
+fn collect_expanded_state(volumes: &[VolumeTree]) -> HashMap<String, bool> {
+    let mut expanded = HashMap::new();
+    for volume in volumes {
+        expanded.insert(volume.root_path.clone(), volume.expanded);
+        collect_folder_expanded(&volume.children, &mut expanded);
+    }
+    expanded
+}
+
+fn collect_folder_expanded(nodes: &[FolderTreeNode], out: &mut HashMap<String, bool>) {
+    for node in nodes {
+        out.insert(node.full_path.clone(), node.expanded);
+        collect_folder_expanded(&node.children, out);
+    }
+}
+
+fn build_volume_tree(folders: &[Folder], expanded: &HashMap<String, bool>) -> Vec<VolumeTree> {
     let mut grouped: BTreeMap<String, VolumeBuilder> = BTreeMap::new();
 
     for folder in folders {
         let path = PathBuf::from(&folder.path);
         let (volume_name, volume_root, parts) = split_volume_components(&path);
         let builder = grouped
-            .entry(volume_name.clone())
+            .entry(volume_root.to_string_lossy().to_string())
             .or_insert_with(|| VolumeBuilder::new(volume_name.clone(), volume_root.clone()));
         builder.insert(&parts);
     }
 
     grouped
         .into_values()
-        .map(|builder| builder.into_volume_node())
+        .map(|builder| builder.into_volume_tree(expanded))
         .collect()
+}
+
+#[derive(Clone)]
+struct VolumeTree {
+    name: String,
+    root_path: String,
+    expanded: bool,
+    children: Vec<FolderTreeNode>,
+}
+
+#[derive(Clone)]
+struct FolderTreeNode {
+    name: String,
+    full_path: String,
+    expanded: bool,
+    children: Vec<FolderTreeNode>,
+}
+
+fn flatten_volume_tree(volume: &VolumeTree) -> VolumeNode {
+    let mut rows = Vec::new();
+    push_visible_rows(volume, 0, &mut rows);
+    let row_model: Rc<VecModel<FolderTreeRow>> = Rc::new(VecModel::from(rows));
+    VolumeNode {
+        name: SharedString::from(volume.name.clone()),
+        root_path: SharedString::from(volume.root_path.clone()),
+        rows: row_model.into(),
+    }
+}
+
+fn push_visible_rows(volume: &VolumeTree, level: i32, out: &mut Vec<FolderTreeRow>) {
+    out.push(FolderTreeRow {
+        name: SharedString::from(volume.name.clone()),
+        full_path: SharedString::from(volume.root_path.clone()),
+        level,
+        expanded: volume.expanded,
+        has_children: !volume.children.is_empty(),
+    });
+
+    if volume.expanded {
+        push_child_rows(&volume.children, level + 1, out);
+    }
+}
+
+fn push_child_rows(nodes: &[FolderTreeNode], level: i32, out: &mut Vec<FolderTreeRow>) {
+    for node in nodes {
+        out.push(FolderTreeRow {
+            name: SharedString::from(node.name.clone()),
+            full_path: SharedString::from(node.full_path.clone()),
+            level,
+            expanded: node.expanded,
+            has_children: !node.children.is_empty(),
+        });
+        if node.expanded {
+            push_child_rows(&node.children, level + 1, out);
+        }
+    }
+}
+
+fn toggle_folder_expansion(
+    path: &str,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+) {
+    let mut guard = folio_state.borrow_mut();
+    if toggle_node(&mut guard.volume_tree, path) {
+        guard.refresh_volume_models();
+        let volumes = guard.volumes.clone();
+        drop(guard);
+
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_volumes(volumes.into());
+        }
+    }
+}
+
+fn toggle_node(volumes: &mut [VolumeTree], target: &str) -> bool {
+    for volume in volumes.iter_mut() {
+        if volume.root_path == target {
+            volume.expanded = !volume.expanded;
+            return true;
+        }
+
+        if toggle_children(&mut volume.children, target) {
+            return true;
+        }
+    }
+    false
+}
+
+fn toggle_children(children: &mut [FolderTreeNode], target: &str) -> bool {
+    for node in children.iter_mut() {
+        if node.full_path == target {
+            node.expanded = !node.expanded;
+            return true;
+        }
+
+        if toggle_children(&mut node.children, target) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(target_os = "windows")]
@@ -1755,15 +1898,19 @@ impl VolumeBuilder {
         }
     }
 
-    fn into_volume_node(self) -> VolumeNode {
-        let mut rows = Vec::new();
-        for child in self.children.into_values() {
-            child.push_rows(1, &mut rows);
-        }
-        let children_model: Rc<VecModel<FolderRow>> = Rc::new(VecModel::from(rows));
-        VolumeNode {
-            name: SharedString::from(self.display_name),
-            folders: children_model.into(),
+    fn into_volume_tree(self, expanded: &HashMap<String, bool>) -> VolumeTree {
+        let root_path = self.root.to_string_lossy().to_string();
+        let children = self
+            .children
+            .into_values()
+            .map(|child| child.into_node(expanded))
+            .collect();
+        let is_expanded = expanded.get(&root_path).copied().unwrap_or(true);
+        VolumeTree {
+            name: self.display_name,
+            root_path,
+            expanded: is_expanded,
+            children,
         }
     }
 }
@@ -1795,15 +1942,19 @@ impl FolderTreeBuilder {
         }
     }
 
-    fn push_rows(self, depth: i32, out: &mut Vec<FolderRow>) {
-        out.push(FolderRow {
-            name: SharedString::from(self.name),
-            full_path: SharedString::from(self.full_path.to_string_lossy().to_string()),
-            depth,
-        });
-
-        for child in self.children.into_values() {
-            child.push_rows(depth + 1, out);
+    fn into_node(self, expanded: &HashMap<String, bool>) -> FolderTreeNode {
+        let path_string = self.full_path.to_string_lossy().to_string();
+        let children = self
+            .children
+            .into_values()
+            .map(|child| child.into_node(expanded))
+            .collect();
+        let is_expanded = expanded.get(&path_string).copied().unwrap_or(true);
+        FolderTreeNode {
+            name: self.name,
+            full_path: path_string,
+            expanded: is_expanded,
+            children,
         }
     }
 }
@@ -1999,6 +2150,7 @@ fn apply_thumbnail_view(
         ui.set_metadata(empty_metadata());
         ui.set_keywords_text("".into());
         ui.set_selected_image_id(-1);
+        ui.invoke_reset_thumbnail_scroll();
     }
 }
 
@@ -2020,7 +2172,7 @@ fn load_folder_thumbnails(
             return;
         };
         let filters = folio_state.borrow().filters.clone();
-        let images = match session.service.list_images_in_folder(folder_path) {
+        let images = match session.service.list_images_recursively(folder_path) {
             Ok(list) => list,
             Err(err) => {
                 eprintln!("Failed to list images: {err}");

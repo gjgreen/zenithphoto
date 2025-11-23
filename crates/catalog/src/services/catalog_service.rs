@@ -50,6 +50,35 @@ impl CatalogService {
             .with_context(|| format!("failed to list images for folder {}", folder_path.display()))
     }
 
+    pub fn list_images_recursively(&self, folder_path: &Path) -> Result<Vec<Image>> {
+        let normalized = folder_path.to_string_lossy().to_string();
+        let mut prefix = normalized.clone();
+        if !normalized.ends_with(std::path::MAIN_SEPARATOR)
+            && !normalized.ends_with('/')
+            && !normalized.ends_with('\\')
+        {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        prefix.push('%');
+
+        query_all(
+            &self.db,
+            "SELECT
+                i.id, i.folder_id, i.filename, i.original_path, i.sidecar_path, i.sidecar_hash, i.filesize,
+                i.file_hash, i.file_modified_at, i.imported_at, i.captured_at, i.camera_make,
+                i.camera_model, i.lens_model, i.focal_length, i.aperture, i.shutter_speed, i.iso,
+                i.orientation, i.gps_latitude, i.gps_longitude, i.gps_altitude, i.rating, i.flag,
+                i.color_label, i.metadata_json, i.created_at, i.updated_at
+             FROM images i
+             INNER JOIN folders f ON f.id = i.folder_id
+             WHERE f.path = ?1 OR f.path LIKE ?2
+             ORDER BY i.captured_at IS NULL, i.captured_at",
+            params![normalized, prefix],
+            Image::from_row,
+        )
+        .context("failed to list images recursively")
+    }
+
     pub fn list_all_photos(&self) -> Result<Vec<Image>> {
         query_all(
             &self.db,
