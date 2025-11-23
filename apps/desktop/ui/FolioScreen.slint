@@ -569,8 +569,6 @@ export component FolioScreen inherits Rectangle {
                     thumb_flick := Flickable {
                         width: parent.width;
                         height: parent.height;
-                        viewport-y: 0px;
-                        viewport-x: 0px;
                         viewport-height: grid_container.height;
                         viewport-width: grid_container.width;
 
@@ -634,18 +632,12 @@ export component FolioScreen inherits Rectangle {
                             border-color: #ff00ff;
                             border-width: 1px;
                             Text {
-                                text: "panel=" + (grid_panel.width / 1px) + "x" + (grid_panel.height / 1px)
-                                    + " flick=" + (thumb_flick.width / 1px) + "x" + (thumb_flick.height / 1px)
-                                    + " vp=" + (thumb_flick.viewport-width / 1px) + "x" + (thumb_flick.viewport-height / 1px)
-                                    + " grid=" + (grid_container.width / 1px) + "x" + (grid_container.height / 1px)
-                                    + " cols=" + grid_container.columns + " rows=" + grid_container.rows;
+                                text: "DEBUG overlay active — thumbs=" + root.thumbnails.length;
                                 color: #ffffff;
                                 font-size: 12px;
                                 wrap: word-wrap;
                                 horizontal-stretch: 1;
                                 vertical-stretch: 1;
-                                padding-left: 8px;
-                                padding-top: 6px;
                             }
                         }
                     }
