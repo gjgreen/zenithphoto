@@ -1665,26 +1665,11 @@ struct FolderTreeNode {
 
 fn flatten_volume_tree(volume: &VolumeTree) -> VolumeNode {
     let mut rows = Vec::new();
-    push_visible_rows(volume, 0, &mut rows);
+    push_child_rows(&volume.children, 0, &mut rows);
     let row_model: Rc<VecModel<FolderTreeRow>> = Rc::new(VecModel::from(rows));
     VolumeNode {
         name: SharedString::from(volume.name.clone()),
-        root_path: SharedString::from(volume.root_path.clone()),
         rows: row_model.into(),
-    }
-}
-
-fn push_visible_rows(volume: &VolumeTree, level: i32, out: &mut Vec<FolderTreeRow>) {
-    out.push(FolderTreeRow {
-        name: SharedString::from(volume.name.clone()),
-        full_path: SharedString::from(volume.root_path.clone()),
-        level,
-        expanded: volume.expanded,
-        has_children: !volume.children.is_empty(),
-    });
-
-    if volume.expanded {
-        push_child_rows(&volume.children, level + 1, out);
     }
 }
 

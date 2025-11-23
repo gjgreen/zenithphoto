@@ -10,7 +10,6 @@ export struct FolderTreeRow {
 
 export struct VolumeNode {
     name: string,
-    root_path: string,
     rows: [FolderTreeRow],
 }
 
@@ -178,7 +177,7 @@ component FolderIcon inherits Rectangle {
     }
 }
 
-component FolderNodeItem inherits Rectangle {
+component FolderRow inherits Rectangle {
     in property <string> name;
     in property <bool> expanded;
     in property <int> level;
@@ -187,15 +186,15 @@ component FolderNodeItem inherits Rectangle {
     callback toggle();
     callback activate();
 
-    height: 28px;
+    height: 22px;
     horizontal-stretch: 1;
     border-radius: 4px;
     background: selected ? #1f3a70 : #181818;
     animate background { duration: 120ms; }
 
     HorizontalLayout {
-        spacing: 6px;
-        padding-left: level * 12px + 6px;
+        spacing: 4px;
+        padding-left: level * 16px;
         padding-right: 8px;
 
         arrow_area := TouchArea {
@@ -218,7 +217,7 @@ component FolderNodeItem inherits Rectangle {
             clicked => activate();
 
             HorizontalLayout {
-                spacing: 8px;
+                spacing: 6px;
                 FolderIcon {
                     open: root.has_children && root.expanded;
                     y: (parent.height - self.height) / 2;
@@ -227,6 +226,7 @@ component FolderNodeItem inherits Rectangle {
                     text: name;
                     color: #d0d0d0;
                     y: (parent.height - self.height) / 2;
+                    vertical-alignment: center;
                 }
             }
         }
@@ -446,8 +446,16 @@ export component FolioScreen inherits Rectangle {
 
                         for volume in root.volumes: VerticalLayout {
                             spacing: 2px;
+                            padding-top: 8px;
+                            padding-bottom: 4px;
 
-                            for folder in volume.rows: FolderNodeItem {
+                            Text {
+                                text: volume.name;
+                                font-weight: 600;
+                                color: #d8d8d8;
+                            }
+
+                            for folder in volume.rows: FolderRow {
                                 name: folder.name;
                                 expanded: folder.expanded;
                                 level: folder.level;
@@ -548,11 +556,15 @@ export component FolioScreen inherits Rectangle {
                     }
                 }
 
-                thumbnail_scroll := ScrollView {
+                thumb_flick := Flickable {
                     vertical-stretch: 1;
                     viewport-y: 0px;
+                    viewport-x: 0px;
 
                     grid_container := Rectangle {
+                        x: 0;
+                        y: 0;
+
                         property <float> columns: {
                             let available = grid_panel.inner_width - root.thumbnail-grid-padding * 2;
                             let cell = root.thumbnail-card-width + root.thumbnail-gap;
@@ -566,12 +578,12 @@ export component FolioScreen inherits Rectangle {
                         property <length> content-width: root.thumbnail-grid-padding * 2
                             + self.columns * root.thumbnail-card-width
                             + (self.columns - 1) * root.thumbnail-gap;
-                        property <length> content-height: root.thumbnail-grid-padding-y
+                        property <length> content-height: root.thumbnail-grid-padding-y * 2
                             + self.rows * root.thumbnail-card-height
                             + (self.rows - 1) * root.thumbnail-gap;
 
                         width: self.content-width > grid_panel.inner_width ? self.content-width : grid_panel.inner_width;
-                        height: self.content-height + root.thumbnail-grid-padding-y;
+                        height: self.content-height;
 
                         for thumb[idx] in root.thumbnails: ThumbnailCard {
                             thumb-size: root.thumbnail-size;
@@ -705,7 +717,7 @@ export component FolioScreen inherits Rectangle {
     }
 
     reset_thumbnail_scroll => {
-        thumbnail_scroll.viewport-y = 0px;
-        thumbnail_scroll.viewport-x = 0px;
+        thumb_flick.viewport-y = 0px;
+        thumb_flick.viewport-x = 0px;
     }
 }
