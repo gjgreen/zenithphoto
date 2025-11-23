@@ -202,7 +202,6 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: parent.height;
                     visible: root.current-tab == 0;
-                    enabled: root.current-tab == 0;
 
                     volumes <=> root.volumes;
                     virtual_collections_model <=> root.virtual-collections;
@@ -241,7 +240,6 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: parent.height;
                     visible: root.current-tab == 1;
-                    enabled: root.current-tab == 1;
 
                     image_id <=> root.refine-image-id;
                     file_path <=> root.refine-path;

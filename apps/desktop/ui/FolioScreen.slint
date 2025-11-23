@@ -232,10 +232,6 @@ component FolderNodeItem inherits Rectangle {
         }
     }
 
-    reset_thumbnail_scroll => {
-        thumbnail_scroll.viewport-y = 0px;
-        thumbnail_scroll.viewport-x = 0px;
-    }
 }
 
 component ThumbnailCard inherits Rectangle {
@@ -328,6 +324,7 @@ component ThumbnailCard inherits Rectangle {
             }
         }
     }
+
 }
 
 component MetaRow inherits HorizontalLayout {
@@ -705,5 +702,10 @@ export component FolioScreen inherits Rectangle {
                 }
             }
         }
+    }
+
+    reset_thumbnail_scroll => {
+        thumbnail_scroll.viewport-y = 0px;
+        thumbnail_scroll.viewport-x = 0px;
     }
 }
