@@ -55,6 +55,28 @@ struct FilterState {
     color_label: String,
 }
 
+fn normalize_flag_value(flag: Option<&String>) -> String {
+    let val = flag.map(|s| s.as_str()).unwrap_or_default().trim().to_ascii_lowercase();
+    if val.is_empty() || val == "none" {
+        "none".into()
+    } else {
+        val
+    }
+}
+
+fn normalize_color_label_value(label: Option<&String>) -> String {
+    let val = label
+        .map(|s| s.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if val.is_empty() || val == "none" {
+        "none".into()
+    } else {
+        val
+    }
+}
+
 struct FolioState {
     folder_tree: Rc<VecModel<FolderNode>>,
     thumbnails: Rc<VecModel<ThumbnailItem>>,
@@ -100,8 +122,8 @@ fn empty_metadata() -> ImageMetadata {
         gps_lat: "".into(),
         gps_lon: "".into(),
         rating: 0,
-        flag: "".into(),
-        color_label: "".into(),
+        flag: "none".into(),
+        color_label: "none".into(),
         keywords: Rc::<VecModel<SharedString>>::default().into(),
     }
 }
@@ -1499,6 +1521,8 @@ fn load_folder_thumbnails(
 
             let display_thumb = load_or_generate_thumbnail(&session.service, &img)
                 .unwrap_or_else(placeholder_image);
+            let flag = normalize_flag_value(img.flag.as_ref());
+            let color_label = normalize_color_label_value(img.color_label.as_ref());
 
             items.push(ThumbnailItem {
                 id: img.id as i32,
@@ -1506,8 +1530,8 @@ fn load_folder_thumbnails(
                 display_thumb,
                 selected: false,
                 rating: img.rating.unwrap_or(0) as i32,
-                flag: SharedString::from(img.flag.unwrap_or_default()),
-                color_label: SharedString::from(img.color_label.unwrap_or_default()),
+                flag: SharedString::from(flag),
+                color_label: SharedString::from(color_label),
             });
         }
         (items, total_size)
@@ -1753,8 +1777,10 @@ fn refresh_thumbnail(
                 path: SharedString::from(image.original_path.clone()),
                 display_thumb,
                 rating: image.rating.unwrap_or(0) as i32,
-                flag: SharedString::from(image.flag.unwrap_or_default()),
-                color_label: SharedString::from(image.color_label.unwrap_or_default()),
+                flag: SharedString::from(normalize_flag_value(image.flag.as_ref())),
+                color_label: SharedString::from(normalize_color_label_value(
+                    image.color_label.as_ref(),
+                )),
                 selected: is_selected,
             },
         );
@@ -1831,8 +1857,8 @@ fn refresh_metadata_panel(
         gps_lat: gps_lat.into(),
         gps_lon: gps_lon.into(),
         rating: image.rating.unwrap_or(0) as i32,
-        flag: image.flag.clone().unwrap_or_default().into(),
-        color_label: image.color_label.clone().unwrap_or_default().into(),
+        flag: normalize_flag_value(image.flag.as_ref()).into(),
+        color_label: normalize_color_label_value(image.color_label.as_ref()).into(),
         keywords: keywords_model.clone().into(),
     };
 

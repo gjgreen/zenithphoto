@@ -117,10 +117,9 @@ impl CatalogService {
 
     pub fn update_flag(&self, image_id: i64, flag: &str) -> Result<()> {
         let normalized = flag.trim();
-        let normalized = if normalized.is_empty() {
-            None
-        } else {
-            Some(normalized.to_ascii_lowercase())
+        let normalized = match normalized.to_ascii_lowercase().as_str() {
+            "" | "none" => None,
+            other => Some(other.to_string()),
         };
 
         self.db
@@ -134,10 +133,9 @@ impl CatalogService {
 
     pub fn update_color_label(&self, image_id: i64, label: &str) -> Result<()> {
         let normalized = label.trim();
-        let normalized = if normalized.is_empty() {
-            None
-        } else {
-            Some(normalized.to_ascii_lowercase())
+        let normalized = match normalized.to_ascii_lowercase().as_str() {
+            "" | "none" => None,
+            other => Some(other.to_string()),
         };
         self.db
             .execute(

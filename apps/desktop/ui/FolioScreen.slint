@@ -10,10 +10,10 @@ export struct ThumbnailItem {
     id: int,
     path: string,
     display_thumb: image,
-    selected: bool,
     rating: int,
     flag: string,
     color_label: string,
+    selected: bool,
 }
 
 export struct ImageMetadata {
@@ -69,6 +69,68 @@ export global FolioTheme {
     }
 }
 
+component DiamondIcon inherits Rectangle {
+    in property <bool> filled;
+    in property <length> size: 11px;
+
+    width: size;
+    height: size;
+    Path {
+        width: parent.width;
+        height: parent.height;
+        stroke-width: 1.3px;
+        stroke: filled ? #f2f2f2 : #9a9a9a;
+        fill: filled ? #f2f2f2 : transparent;
+        opacity: filled ? 1.0 : 0.45;
+        commands: "M 5.5 0 L 11 5.5 L 5.5 11 L 0 5.5 Z";
+    }
+}
+
+component CircleIcon inherits Rectangle {
+    in property <brush> fill: #555;
+    in property <bool> selected: false;
+
+    width: 12px;
+    height: 12px;
+    border-radius: 6px;
+    background: fill;
+    border-width: selected ? 1.3px : 0px;
+    border-color: selected ? #7aa7ff : transparent;
+    animate background { duration: 120ms; }
+}
+
+component CheckIcon inherits Rectangle {
+    in property <brush> stroke_color: #00c040;
+
+    width: 14px;
+    height: 12px;
+
+    Path {
+        width: 14px;
+        height: 12px;
+        stroke: stroke_color;
+        stroke-width: 2px;
+        fill: transparent;
+        commands: "M 1 7 L 5 11 L 13 1";
+    }
+}
+
+component CrossIcon inherits Rectangle {
+    in property <brush> stroke_color: #ff4040;
+
+    width: 12px;
+    height: 12px;
+
+    Path {
+        width: 12px;
+        height: 12px;
+        stroke: stroke_color;
+        stroke-width: 2px;
+        fill: transparent;
+        commands: "M 1 1 L 11 11 M 11 1 L 1 11";
+    }
+}
+
 component ThumbnailCard inherits Rectangle {
     in property <int> item-id;
     in property <string> path;
@@ -117,13 +179,33 @@ component ThumbnailCard inherits Rectangle {
 
         Text { text: path; font-size: 11px; wrap: no-wrap; overflow: elide; color: #d0d0d0; }
 
-        HorizontalLayout {
-            spacing: 6px;
-            Text { text: rating > 0 ? ("★ " + rating) : "Unrated"; font-size: 10px; color: #f1c40f; wrap: no-wrap; }
-            if flag != "": Text { text: flag; font-size: 10px; color: flag == "rejected" ? #ef4444 : #76ff7a; wrap: no-wrap; }
-            if color-label != "": Rectangle {
-                width: 12px; height: 12px; border-radius: 2px;
-                background: FolioTheme.label_color(color-label);
+        badges := Rectangle {
+            border-radius: 4px;
+            background: selected ? #1c2744 : #101010;
+            border-width: selected ? 1px : 0px;
+            border-color: #2d4678;
+            horizontal-stretch: 1;
+
+            HorizontalLayout {
+                spacing: 8px;
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+
+                HorizontalLayout {
+                    spacing: 3px;
+                    for i in 5: DiamondIcon { filled: (i + 1) <= rating; }
+                }
+
+                CircleIcon {
+                    fill: FolioTheme.label_color(color-label);
+                    selected: selected;
+                    opacity: color-label == "none" ? 0.55 : 1.0;
+                }
+
+                if flag == "picked": CheckIcon { stroke_color: #00c040; }
+                if flag == "rejected": CrossIcon { stroke_color: #ff4040; }
             }
         }
     }
@@ -428,7 +510,7 @@ export component FolioScreen inherits Rectangle {
                                 current-index: root.metadata.flag == "picked" ? 1 : root.metadata.flag == "rejected" ? 2 : 0;
                                 enabled: root.selected_image_id >= 0;
                                 selected(value) => {
-                                    let flag_value = self.current-index == 1 ? "picked" : self.current-index == 2 ? "rejected" : "";
+                                    let flag_value = self.current-index == 1 ? "picked" : self.current-index == 2 ? "rejected" : "none";
                                     if (root.selected_image_id >= 0 && flag_value != root.metadata.flag) {
                                         root.flag_changed(root.selected_image_id, flag_value);
                                     }
@@ -442,8 +524,9 @@ export component FolioScreen inherits Rectangle {
                                 enabled: root.selected_image_id >= 0;
                                 selected(value) => {
                                     let label = FolioTheme.map_color_label(self.current-index);
-                                    if (root.selected_image_id >= 0 && label != root.metadata.color_label) {
-                                        root.label_changed(root.selected_image_id, label);
+                                    let normalized = label == "" ? "none" : label;
+                                    if (root.selected_image_id >= 0 && normalized != root.metadata.color_label) {
+                                        root.label_changed(root.selected_image_id, normalized);
                                     }
                                 }
                             }
