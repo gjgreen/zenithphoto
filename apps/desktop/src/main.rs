@@ -1661,7 +1661,7 @@ fn split_volume_components(path: &Path) -> (String, PathBuf, Vec<String>) {
                 Component::Prefix(prefix) => {
                     let name = match prefix.kind() {
                         Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
-                            format!("{}:", (*letter as char).to_ascii_uppercase())
+                            format!("{}:", (letter as char).to_ascii_uppercase())
                         }
                         _ => prefix.as_os_str().to_string_lossy().to_string(),
                     };
