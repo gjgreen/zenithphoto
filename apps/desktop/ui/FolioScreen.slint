@@ -337,8 +337,6 @@ export component FolioScreen inherits Rectangle {
 
                 ScrollView {
                     vertical-stretch: 1;
-                    viewport-width: tree_container.width;
-                    viewport-height: tree_container.height;
                     tree_container := Rectangle {
                         horizontal-stretch: 1;
                         VerticalLayout {
@@ -464,12 +462,10 @@ export component FolioScreen inherits Rectangle {
 
                 thumbnail_scroll := ScrollView {
                     vertical-stretch: 1;
-                    viewport-width: grid_container.width;
-                    viewport-height: grid_container.height;
 
                     grid_container := Rectangle {
                         property <float> columns: {
-                            let available = thumbnail_scroll.visible-width - root.thumbnail-grid-padding * 2;
+                            let available = thumbnail_scroll.width - root.thumbnail-grid-padding * 2;
                             let cell = root.thumbnail-card-width + root.thumbnail-gap;
                             let count = Math.floor(available / cell);
                             count < 1 ? 1 : count;
@@ -485,7 +481,7 @@ export component FolioScreen inherits Rectangle {
                             + self.rows * root.thumbnail-card-height
                             + (self.rows - 1) * root.thumbnail-gap;
 
-                        width: self.content-width > thumbnail_scroll.visible-width ? self.content-width : thumbnail_scroll.visible-width;
+                        width: self.content-width > thumbnail_scroll.width ? self.content-width : thumbnail_scroll.width;
                         height: self.content-height;
 
                         for thumb[idx] in root.thumbnails: ThumbnailCard {

@@ -255,12 +255,10 @@ export component ImportPhotosScreen inherits Window {
                     horizontal-stretch: 1;
                     thumbnail_scroll := ScrollView {
                         vertical-stretch: 1;
-                        viewport-width: grid_container.width;
-                        viewport-height: grid_container.height;
 
                         grid_container := Rectangle {
                             property <float> columns: {
-                                let available = thumbnail_scroll.visible-width - root.thumb_padding * 2;
+                                let available = thumbnail_scroll.width - root.thumb_padding * 2;
                                 let cell = root.card_width + root.thumb_gap;
                                 let count = Math.floor(available / cell);
                                 let min_cols = root.grid_columns;
@@ -278,7 +276,7 @@ export component ImportPhotosScreen inherits Window {
                                 + self.rows * root.card_height
                                 + (self.rows - 1) * root.thumb_gap;
 
-                            width: self.content-width > thumbnail_scroll.visible-width ? self.content-width : thumbnail_scroll.visible-width;
+                            width: self.content-width > thumbnail_scroll.width ? self.content-width : thumbnail_scroll.width;
                             height: self.content-height;
 
                             for thumb[idx] in root.thumbnails: ImportThumbnailCard {
