@@ -1208,26 +1208,18 @@ fn begin_import(
                             eprintln!("Failed to persist last import timestamp: {err}");
                         }
                     }
-                    slint::invoke_from_event_loop({
-                        let ui_refresh = ui_refresh.clone();
-                        let catalog_state = catalog_state_for_refresh.clone();
-                        let folio_state = folio_state_for_refresh.clone();
-                        let config_store = config_store_for_refresh.clone();
-                        let ts = last_import_ts.clone();
-                        move || {
-                            if let Some(ts) = ts {
-                                folio_state.borrow_mut().last_import_timestamp = Some(ts);
-                            }
-                            refresh_folio_tree(&ui_refresh, &catalog_state, &folio_state);
-                            reload_current_selection(
-                                &catalog_state,
-                                &folio_state,
-                                &ui_refresh,
-                                &config_store,
-                            );
-                        }
-                    })
-                    .ok();
+                    if let Some(ts) = last_import_ts {
+                        folio_state_for_refresh
+                            .borrow_mut()
+                            .last_import_timestamp = Some(ts);
+                    }
+                    refresh_folio_tree(&ui_refresh, &catalog_state_for_refresh, &folio_state_for_refresh);
+                    reload_current_selection(
+                        &catalog_state_for_refresh,
+                        &folio_state_for_refresh,
+                        &ui_refresh,
+                        &config_store_for_refresh,
+                    );
 
                     ui.set_status_text(summary.clone().into());
                     ui.set_progress(1.0);
@@ -1764,15 +1756,14 @@ impl VolumeBuilder {
     }
 
     fn into_volume_node(self) -> VolumeNode {
-        let children_vec: Vec<FolderNode> = self
-            .children
-            .into_values()
-            .map(|child| child.into_node())
-            .collect();
-        let children_model: Rc<VecModel<FolderNode>> = Rc::new(VecModel::from(children_vec));
+        let mut rows = Vec::new();
+        for child in self.children.into_values() {
+            child.push_rows(1, &mut rows);
+        }
+        let children_model: Rc<VecModel<FolderRow>> = Rc::new(VecModel::from(rows));
         VolumeNode {
             name: SharedString::from(self.display_name),
-            children: children_model.into(),
+            folders: children_model.into(),
         }
     }
 }
@@ -1804,17 +1795,15 @@ impl FolderTreeBuilder {
         }
     }
 
-    fn into_node(self) -> FolderNode {
-        let children_vec: Vec<FolderNode> = self
-            .children
-            .into_values()
-            .map(|child| child.into_node())
-            .collect();
-        let children_model: Rc<VecModel<FolderNode>> = Rc::new(VecModel::from(children_vec));
-        FolderNode {
+    fn push_rows(self, depth: i32, out: &mut Vec<FolderRow>) {
+        out.push(FolderRow {
             name: SharedString::from(self.name),
             full_path: SharedString::from(self.full_path.to_string_lossy().to_string()),
-            children: children_model.into(),
+            depth,
+        });
+
+        for child in self.children.into_values() {
+            child.push_rows(depth + 1, out);
         }
     }
 }

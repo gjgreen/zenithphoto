@@ -115,7 +115,7 @@ impl ConfigStore {
 
     pub fn set_folio_selection(&self, selection: FolioLastSelection) -> Result<AppConfig> {
         self.update(|cfg| {
-            cfg.folio_last_selection = Some(selection);
+            cfg.folio_last_selection = Some(selection.clone());
             true
         })
     }

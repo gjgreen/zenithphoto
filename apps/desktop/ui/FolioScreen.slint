@@ -1,14 +1,14 @@
 import { Button, ComboBox, ScrollView, SpinBox, TextEdit } from "std-widgets.slint";
 
-export struct FolderNode {
+export struct FolderRow {
     name: string,
     full_path: string,
-    children: [FolderNode],
+    depth: int,
 }
 
 export struct VolumeNode {
     name: string,
-    children: [FolderNode],
+    folders: [FolderRow],
 }
 
 export struct VirtualCollectionItem {
@@ -262,57 +262,6 @@ component VirtualCollectionRow inherits Rectangle {
     TouchArea { clicked => activated(kind); }
 }
 
-component FolderBranch inherits VerticalLayout {
-    in property <FolderNode> node;
-    in property <int> depth: 0;
-    in property <string> selected_path;
-    callback folder_clicked(path: string);
-
-    spacing: 2px;
-
-    Rectangle {
-        height: 28px;
-        horizontal-stretch: 1;
-        border-radius: 4px;
-        background: selected_path == node.full_path ? #1f3a70 : #181818;
-        animate background { duration: 120ms; }
-
-        HorizontalLayout {
-            spacing: 6px;
-            padding: 6px;
-
-            Rectangle { width: depth * 12px; height: 1px; opacity: 0; }
-            Text { text: node.name; color: #d0d0d0; }
-        }
-
-        TouchArea { clicked => folder_clicked(node.full_path); }
-    }
-
-    for child in node.children: FolderBranch {
-        node: child;
-        depth: depth + 1;
-        selected_path: root.selected_path;
-        folder_clicked(path) => root.folder_clicked(path);
-    }
-}
-
-component VolumeSection inherits VerticalLayout {
-    in property <VolumeNode> volume;
-    in property <string> selected_path;
-    callback folder_clicked(path: string);
-
-    spacing: 4px;
-
-    Text { text: volume.name; color: #8fb1ff; font-weight: 600; }
-
-    for child in volume.children: FolderBranch {
-        node: child;
-        depth: 1;
-        selected_path: root.selected_path;
-        folder_clicked(path) => root.folder_clicked(path);
-    }
-}
-
 export component FolioScreen inherits Rectangle {
     in-out property <[VolumeNode]> volumes;
     in-out property <[VirtualCollectionItem]> virtual_collections_model;
@@ -400,13 +349,31 @@ export component FolioScreen inherits Rectangle {
                                 color: #8c8c8c;
                             }
 
-                            for volume in root.volumes: VolumeSection {
-                                volume: volume;
-                                selected_path: root.selected_folder_path;
-                                folder_clicked(path) => {
-                                    root.selected_folder_path = path;
-                                    root.selected_virtual_collection = "";
-                                    root.folder_selected(path);
+                            for volume in root.volumes: VerticalLayout {
+                                spacing: 4px;
+                                Text { text: volume.name; color: #8fb1ff; font-weight: 600; }
+
+                                for folder in volume.folders: Rectangle {
+                                    height: 28px;
+                                    horizontal-stretch: 1;
+                                    border-radius: 4px;
+                                    background: root.selected_folder_path == folder.full_path ? #1f3a70 : #181818;
+                                    animate background { duration: 120ms; }
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                    padding: 6px;
+                                    Rectangle { width: folder.depth * 12px; height: 1px; opacity: 0; }
+                                    Text { text: folder.name; color: #d0d0d0; }
+                                    }
+
+                                    TouchArea {
+                                        clicked => {
+                                            root.selected_folder_path = folder.full_path;
+                                            root.selected_virtual_collection = "";
+                                            root.folder_selected(folder.full_path);
+                                        }
+                                    }
                                 }
                             }
                         }

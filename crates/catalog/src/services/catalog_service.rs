@@ -68,7 +68,7 @@ impl CatalogService {
     }
 
     pub fn last_import_timestamp(&self) -> Result<Option<DateTime<Utc>>> {
-        query_optional(
+        query_one(
             &self.db,
             "SELECT MAX(imported_at) FROM images",
             [],
