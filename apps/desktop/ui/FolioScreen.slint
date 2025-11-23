@@ -431,9 +431,11 @@ export component FolioScreen inherits Rectangle {
 
                 Rectangle { height: 1px; background: #333; horizontal-stretch: 1; }
 
-                ScrollView {
+                folder_scroll := ScrollView {
                     vertical-stretch: 1;
-                    VerticalLayout {
+                    viewport-height: folder_list.preferred-height;
+                    viewport-width: folder_list.preferred-width;
+                    folder_list := VerticalLayout {
                         padding: 2px;
                         spacing: 4px;
                         alignment: start;
@@ -483,7 +485,7 @@ export component FolioScreen inherits Rectangle {
             horizontal-stretch: 1;
             property <length> inner_width: Math.max(self.width - 20px, 0px);
 
-            VerticalLayout {
+                VerticalLayout {
                 padding: 10px;
                 spacing: 10px;
                 alignment: start;
@@ -576,7 +578,7 @@ export component FolioScreen inherits Rectangle {
                             let available = grid_panel.inner_width - root.thumbnail-grid-padding * 2;
                             let cell = root.thumbnail-card-width + root.thumbnail-gap;
                             let count = Math.floor((available + root.thumbnail-gap) / cell);
-                            count < 1 ? 1 : count;
+                            if count < 1 { 1 } else if count > 8 { 8 } else { count }
                         }
                         property <float> rows: {
                             let total = root.thumbnails.length;
@@ -591,6 +593,8 @@ export component FolioScreen inherits Rectangle {
 
                         width: self.content-width > grid_panel.inner_width ? self.content-width : grid_panel.inner_width;
                         height: self.content-height;
+                        preferred-width: self.width;
+                        preferred-height: self.height;
 
                         for thumb[idx] in root.thumbnails: ThumbnailCard {
                             thumb-size: root.thumbnail-size;
