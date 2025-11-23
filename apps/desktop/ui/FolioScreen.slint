@@ -630,6 +630,22 @@ export component FolioScreen inherits Rectangle {
                             x: 6px;
                             y: 6px;
                         }
+
+                        // DEBUG overlay to surface layout sizing
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: 380px;
+                            height: 22px;
+                            background: #222222aa;
+                            Text {
+                                text: "grid: " + (grid_container.width / 1px) + "x" + (grid_container.height / 1px) + " cols=" + grid_container.columns + " rows=" + grid_container.rows;
+                                color: #f0f0f0;
+                                font-size: 11px;
+                                padding-left: 8px;
+                                padding-top: 4px;
+                            }
+                        }
                     }
                 }
 
