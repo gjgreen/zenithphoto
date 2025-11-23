@@ -381,10 +381,11 @@ export component FolioScreen inherits Rectangle {
         }
 
         // Thumbnail grid and filters
-        Rectangle {
+        grid_panel := Rectangle {
             background: #121212;
             border-radius: 8px;
             horizontal-stretch: 1;
+            property <length> inner_width: Math.max(self.width - 20px, 0px);
 
             VerticalLayout {
                 padding: 10px;
@@ -465,7 +466,7 @@ export component FolioScreen inherits Rectangle {
 
                     grid_container := Rectangle {
                         property <float> columns: {
-                            let available = thumbnail_scroll.width - root.thumbnail-grid-padding * 2;
+                            let available = grid_panel.inner_width - root.thumbnail-grid-padding * 2;
                             let cell = root.thumbnail-card-width + root.thumbnail-gap;
                             let count = Math.floor(available / cell);
                             count < 1 ? 1 : count;
@@ -481,7 +482,7 @@ export component FolioScreen inherits Rectangle {
                             + self.rows * root.thumbnail-card-height
                             + (self.rows - 1) * root.thumbnail-gap;
 
-                        width: self.content-width > thumbnail_scroll.width ? self.content-width : thumbnail_scroll.width;
+                        width: self.content-width > grid_panel.inner_width ? self.content-width : grid_panel.inner_width;
                         height: self.content-height;
 
                         for thumb[idx] in root.thumbnails: ThumbnailCard {

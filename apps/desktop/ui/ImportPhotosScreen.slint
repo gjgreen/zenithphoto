@@ -249,7 +249,7 @@ export component ImportPhotosScreen inherits Window {
                 }
 
                 // Center: thumbnails grid
-                Rectangle {
+                import_grid_panel := Rectangle {
                     background: #161616;
                     border-radius: 6px;
                     horizontal-stretch: 1;
@@ -258,7 +258,7 @@ export component ImportPhotosScreen inherits Window {
 
                         grid_container := Rectangle {
                             property <float> columns: {
-                                let available = thumbnail_scroll.width - root.thumb_padding * 2;
+                                let available = import_grid_panel.width - root.thumb_padding * 2;
                                 let cell = root.card_width + root.thumb_gap;
                                 let count = Math.floor(available / cell);
                                 let min_cols = root.grid_columns;
@@ -276,7 +276,7 @@ export component ImportPhotosScreen inherits Window {
                                 + self.rows * root.card_height
                                 + (self.rows - 1) * root.thumb_gap;
 
-                            width: self.content-width > thumbnail_scroll.width ? self.content-width : thumbnail_scroll.width;
+                            width: self.content-width > import_grid_panel.width ? self.content-width : import_grid_panel.width;
                             height: self.content-height;
 
                             for thumb[idx] in root.thumbnails: ImportThumbnailCard {
