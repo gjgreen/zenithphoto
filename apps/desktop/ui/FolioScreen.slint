@@ -483,12 +483,13 @@ export component FolioScreen inherits Rectangle {
             background: #121212;
             border-radius: 8px;
             horizontal-stretch: 1;
+            vertical-stretch: 1;
             property <length> inner_width: Math.max(self.width - 20px, 0px);
 
-                VerticalLayout {
+            VerticalLayout {
+                vertical-stretch: 1;
                 padding: 10px;
                 spacing: 10px;
-                alignment: start;
 
                 // Filters
                 HorizontalLayout {
@@ -560,22 +561,23 @@ export component FolioScreen inherits Rectangle {
                     }
                 }
 
-                thumb_flick_container := Rectangle {
+                Rectangle {
                     vertical-stretch: 1;
                     horizontal-stretch: 1;
-                    clip: true;
-                    background: #0c0c0c;
+                    min-height: 300px;
+                    background: #1e1e1e;
 
-                    thumb_flick := Flickable {
+                    thumb_scroll := ScrollView {
                         width: parent.width;
                         height: parent.height;
-                        viewport-height: grid_container.height;
                         viewport-width: grid_container.width;
+                        viewport-height: grid_container.height;
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-on;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
 
                         grid_container := Rectangle {
                             x: 0;
                             y: 0;
-                            background: #161616;
 
                             property <float> columns: {
                                 let available = grid_panel.inner_width - root.thumbnail-grid-padding * 2;
@@ -620,36 +622,36 @@ export component FolioScreen inherits Rectangle {
                                 }
                                 activated => root.thumbnail_activated(thumb.id);
                             }
-                        }
 
-                        // DEBUG overlay to surface layout sizing
-                        Rectangle {
-                            x: 8px;
-                            y: 8px;
-                            width: 520px;
-                            height: 60px;
-                            background: #ff007744;
-                            border-color: #ff00ff;
-                            border-width: 1px;
-                            Text {
-                                text: "DEBUG overlay active — thumbs=" + root.thumbnails.length;
-                                color: #ffffff;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                                horizontal-stretch: 1;
-                                vertical-stretch: 1;
+                            // DEBUG overlay to surface layout sizing
+                            Rectangle {
+                                x: 8px;
+                                y: 8px;
+                                width: 520px;
+                                height: 60px;
+                                background: #ff007744;
+                                border-color: #ff00ff;
+                                border-width: 1px;
+                                Text {
+                                    text: "DEBUG overlay active — thumbs=" + root.thumbnails.length;
+                                    color: #ffffff;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
                             }
                         }
                     }
                 }
 
                 // Status bar
-                Rectangle {
+                status_bar := Rectangle {
                     height: 32px;
                     border-radius: 6px;
                     background: #151515;
+                    horizontal-stretch: 1;
 
                     HorizontalLayout {
+                        horizontal-stretch: 1;
                         padding: 8px;
                         spacing: 12px;
 
@@ -657,6 +659,7 @@ export component FolioScreen inherits Rectangle {
                         Text { text: root.selected_count + " selected"; color: #c0c0c0; }
                         Text { text: root.size_summary; color: #a0a0a0; }
                         Rectangle { horizontal-stretch: 1; }
+                        Text { text: "thumbs=" + root.thumbnails.length; color: #888; font-size: 10px; }
                         Text { text: "telltale: scroll-fix v4"; color: #666; font-size: 10px; }
                     }
                 }
@@ -753,7 +756,7 @@ export component FolioScreen inherits Rectangle {
     }
 
     reset_thumbnail_scroll => {
-        thumb_flick.viewport-y = 0px;
-        thumb_flick.viewport-x = 0px;
+        thumb_scroll.viewport-y = 0px;
+        thumb_scroll.viewport-x = 0px;
     }
 }
