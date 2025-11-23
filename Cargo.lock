@@ -1070,6 +1070,7 @@ dependencies = [
  "anyhow",
  "app-settings",
  "catalog",
+ "chrono",
  "core-types",
  "directories",
  "engine",
@@ -1083,6 +1084,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "walkdir",
+ "windows 0.62.2",
  "winreg",
 ]
 

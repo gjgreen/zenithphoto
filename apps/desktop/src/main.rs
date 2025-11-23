@@ -7,7 +7,8 @@ use anyhow::{anyhow, Context};
 use catalog::db::{CatalogDb, Folder, Image as CatalogImage, Thumbnail};
 use catalog::services::{CatalogService, Edits};
 use catalog::{Catalog, CatalogPath};
-use config::ConfigStore;
+use chrono::{DateTime, Utc};
+use config::{ConfigStore, FolioLastSelection};
 use engine::ImageEngine;
 use import::{
     import_images_with_callbacks, is_already_imported, parse_keywords, scan_directory_with_options,
@@ -17,7 +18,7 @@ use import::{
 use rfd::{AsyncFileDialog, FileDialog};
 use slint::{Model, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -55,6 +56,23 @@ struct FilterState {
     color_label: String,
 }
 
+#[derive(Clone)]
+enum FolioSelection {
+    AllPhotos,
+    LastImport,
+    Folder(String),
+}
+
+impl FolioSelection {
+    fn kind(&self) -> &'static str {
+        match self {
+            FolioSelection::AllPhotos => "all_photos",
+            FolioSelection::LastImport => "last_import",
+            FolioSelection::Folder(_) => "folder",
+        }
+    }
+}
+
 fn normalize_flag_value(flag: Option<&String>) -> String {
     let val = flag.map(|s| s.as_str()).unwrap_or_default().trim().to_ascii_lowercase();
     if val.is_empty() || val == "none" {
@@ -78,18 +96,31 @@ fn normalize_color_label_value(label: Option<&String>) -> String {
 }
 
 struct FolioState {
-    folder_tree: Rc<VecModel<FolderNode>>,
+    volumes: Rc<VecModel<VolumeNode>>,
+    virtual_collections: Rc<VecModel<VirtualCollectionItem>>,
     thumbnails: Rc<VecModel<ThumbnailItem>>,
     selection: Vec<i32>,
     selection_anchor: Option<usize>,
     filters: FilterState,
-    current_folder: Option<String>,
+    current_selection: Option<FolioSelection>,
+    last_import_timestamp: Option<String>,
 }
 
 impl FolioState {
     fn new() -> Self {
+        let virtual_collections = Rc::new(VecModel::from(vec![
+            VirtualCollectionItem {
+                id: SharedString::from("all_photos"),
+                label: SharedString::from("All Photos"),
+            },
+            VirtualCollectionItem {
+                id: SharedString::from("last_import"),
+                label: SharedString::from("Last Import"),
+            },
+        ]));
         Self {
-            folder_tree: Rc::new(VecModel::default()),
+            volumes: Rc::new(VecModel::default()),
+            virtual_collections,
             thumbnails: Rc::new(VecModel::default()),
             selection: Vec::new(),
             selection_anchor: None,
@@ -99,7 +130,8 @@ impl FolioState {
                 flag: String::new(),
                 color_label: String::new(),
             },
-            current_folder: None,
+            current_selection: None,
+            last_import_timestamp: None,
         }
     }
 
@@ -199,7 +231,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let folio_guard = folio_state.borrow();
-        ui.set_folder_tree(folio_guard.folder_tree.clone().into());
+        ui.set_volumes(folio_guard.volumes.clone().into());
+        ui.set_virtual_collections(folio_guard.virtual_collections.clone().into());
+        ui.set_selected_folder_path("".into());
+        ui.set_selected_virtual_collection("".into());
+        ui.set_catalog_name("".into());
         ui.set_thumbnails(folio_guard.thumbnails.clone().into());
         ui.set_filter_search(folio_guard.filters.search.clone().into());
         ui.set_filter_rating(folio_guard.filters.rating);
@@ -222,18 +258,53 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_refine_whites(0.0);
     ui.set_refine_blacks(0.0);
 
+    let catalog_display_name = catalog_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    ui.set_catalog_name(catalog_display_name.into());
+    {
+        let mut guard = folio_state.borrow_mut();
+        guard.last_import_timestamp = config_store.last_import_timestamp(&catalog_path);
+    }
+
     refresh_folio_tree(&ui_weak, &catalog_state, &folio_state);
+    restore_last_selection(&ui_weak, &catalog_state, &folio_state, &config_store);
 
     {
         let ui_weak = ui_weak.clone();
         let catalog_state = catalog_state.clone();
         let folio_state = folio_state.clone();
+        let config_store = config_store.clone();
         ui.on_folder_selected(move |path| {
-            let path_buf = PathBuf::from(path.as_str());
-            {
-                folio_state.borrow_mut().current_folder = Some(path.to_string());
-            }
-            load_folder_thumbnails(&catalog_state, &folio_state, &ui_weak, &path_buf);
+            apply_selection(
+                FolioSelection::Folder(path.to_string()),
+                &catalog_state,
+                &folio_state,
+                &ui_weak,
+                &config_store,
+            );
+        });
+    }
+
+    {
+        let ui_weak = ui_weak.clone();
+        let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
+        let config_store = config_store.clone();
+        ui.on_virtual_collection_selected(move |kind| {
+            let selection = match kind.as_str() {
+                "last_import" => FolioSelection::LastImport,
+                _ => FolioSelection::AllPhotos,
+            };
+            apply_selection(
+                selection,
+                &catalog_state,
+                &folio_state,
+                &ui_weak,
+                &config_store,
+            );
         });
     }
 
@@ -333,6 +404,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let catalog_state = catalog_state.clone();
         let folio_state = folio_state.clone();
         let ui_weak = ui_weak.clone();
+        let config_store = config_store.clone();
         ui.on_filters_changed(move |search, rating, flag, color_label| {
             folio_state.borrow_mut().filters = FilterState {
                 search: search.to_string(),
@@ -340,14 +412,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 flag: flag.to_string(),
                 color_label: color_label.to_string(),
             };
-            if let Some(folder) = folio_state.borrow().current_folder.clone() {
-                load_folder_thumbnails(
-                    &catalog_state,
-                    &folio_state,
-                    &ui_weak,
-                    &PathBuf::from(folder),
-                );
-            }
+            reload_current_selection(
+                &catalog_state,
+                &folio_state,
+                &ui_weak,
+                &config_store,
+            );
         });
     }
 
@@ -450,8 +520,16 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui_weak.clone();
         let catalog_state = catalog_state.clone();
         let active_import_ui = active_import_ui.clone();
+        let folio_state = folio_state.clone();
+        let config_store = config_store.clone();
         ui.on_import_photos_requested(move || {
-            launch_import_flow(&ui_weak, &catalog_state, &active_import_ui);
+            launch_import_flow(
+                &ui_weak,
+                &catalog_state,
+                &active_import_ui,
+                &folio_state,
+                &config_store,
+            );
         });
     }
 
@@ -588,17 +666,28 @@ fn apply_loaded_catalog(
     }
 
     let display_path = path.to_string_lossy().to_string();
+    let catalog_display_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    {
+        let mut guard = folio_state.borrow_mut();
+        guard.last_import_timestamp = config_store.last_import_timestamp(&path);
+    }
     slint::invoke_from_event_loop({
         let ui_weak = ui_weak.clone();
         move || {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_current_path(display_path.clone().into());
+                ui.set_catalog_name(catalog_display_name.clone().into());
             }
         }
     })
     .ok();
 
     refresh_folio_tree(ui_weak, catalog_state, folio_state);
+    restore_last_selection(ui_weak, catalog_state, folio_state, config_store);
 }
 
 type ImageId = i32;
@@ -984,6 +1073,10 @@ fn begin_import(
     method: ImportMethod,
     destination_directory: Option<PathBuf>,
     allow_duplicates: bool,
+    ui_weak: slint::Weak<MainWindow>,
+    catalog_state: CatalogState,
+    folio_state: Rc<RefCell<FolioState>>,
+    config_store: ConfigStore,
 ) {
     if file_paths.is_empty() {
         if let Some(ui) = import_ui.upgrade() {
@@ -1056,6 +1149,12 @@ fn begin_import(
         cancel: cancel_flag.clone(),
     };
 
+    let catalog_state_for_refresh = catalog_state.clone();
+    let folio_state_for_refresh = folio_state.clone();
+    let config_store_for_refresh = config_store.clone();
+    let ui_refresh = ui_weak.clone();
+    let session_path_for_refresh = session_path.clone();
+
     let ui_done = import_ui.clone();
     let _ = slint::spawn_local(async move {
         let db_path = session_path.to_string_lossy().to_string();
@@ -1100,6 +1199,36 @@ fn begin_import(
                     if report.canceled {
                         summary.push_str(" (canceled)");
                     }
+
+                    let last_import_ts = report.batch_started_at.map(|ts| ts.to_rfc3339());
+                    if let Some(ts) = &last_import_ts {
+                        if let Err(err) =
+                            config_store_for_refresh.record_last_import(&session_path_for_refresh, ts)
+                        {
+                            eprintln!("Failed to persist last import timestamp: {err}");
+                        }
+                    }
+                    slint::invoke_from_event_loop({
+                        let ui_refresh = ui_refresh.clone();
+                        let catalog_state = catalog_state_for_refresh.clone();
+                        let folio_state = folio_state_for_refresh.clone();
+                        let config_store = config_store_for_refresh.clone();
+                        let ts = last_import_ts.clone();
+                        move || {
+                            if let Some(ts) = ts {
+                                folio_state.borrow_mut().last_import_timestamp = Some(ts);
+                            }
+                            refresh_folio_tree(&ui_refresh, &catalog_state, &folio_state);
+                            reload_current_selection(
+                                &catalog_state,
+                                &folio_state,
+                                &ui_refresh,
+                                &config_store,
+                            );
+                        }
+                    })
+                    .ok();
+
                     ui.set_status_text(summary.clone().into());
                     ui.set_progress(1.0);
                     ui.hide().ok();
@@ -1121,6 +1250,8 @@ fn launch_import_flow(
     ui_weak: &slint::Weak<MainWindow>,
     catalog_state: &CatalogState,
     active_import: &Rc<RefCell<Option<ImportPhotosScreen>>>,
+    folio_state: &Rc<RefCell<FolioState>>,
+    config_store: &ConfigStore,
 ) {
     let catalog_path = {
         let guard = catalog_state.borrow();
@@ -1277,6 +1408,10 @@ fn launch_import_flow(
         let view_state = view_state.clone();
         let active_import = active_import.clone();
         let catalog_path = catalog_path.clone();
+        let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
+        let config_store = config_store.clone();
+        let ui_main = ui_weak.clone();
         import_ui.on_perform_import(
             move |_source_dir, destination_dir, paths, keyword_text, method_str| {
                 let allow_duplicates = import_ui_weak
@@ -1317,6 +1452,10 @@ fn launch_import_flow(
                     method,
                     destination,
                     allow_duplicates,
+                    ui_main.clone(),
+                    catalog_state.clone(),
+                    folio_state.clone(),
+                    config_store.clone(),
                 );
             },
         );
@@ -1445,48 +1584,439 @@ fn refresh_folio_tree(
         }
     };
 
-    let tree = build_folder_tree(&folders);
+    let tree = build_volume_tree(&folders);
     {
         let guard = folio_state.borrow();
-        guard.folder_tree.set_vec(tree);
+        guard.volumes.set_vec(tree);
     }
 
     if let Some(ui) = ui_weak.upgrade() {
-        ui.set_folder_tree(folio_state.borrow().folder_tree.clone().into());
+        ui.set_volumes(folio_state.borrow().volumes.clone().into());
     }
 }
 
-fn build_folder_tree(folders: &[Folder]) -> Vec<FolderNode> {
-    let mut paths: Vec<String> = folders.iter().map(|f| f.path.clone()).collect();
-    paths.sort();
-    paths.dedup();
+fn build_volume_tree(folders: &[Folder]) -> Vec<VolumeNode> {
+    let mut grouped: BTreeMap<String, VolumeBuilder> = BTreeMap::new();
 
-    let mut seen = HashSet::new();
-    let mut nodes = Vec::new();
+    for folder in folders {
+        let path = PathBuf::from(&folder.path);
+        let (volume_name, volume_root, parts) = split_volume_components(&path);
+        let builder = grouped
+            .entry(volume_name.clone())
+            .or_insert_with(|| VolumeBuilder::new(volume_name.clone(), volume_root.clone()));
+        builder.insert(&parts);
+    }
 
-    for path in paths {
-        let mut cumulative = if path.starts_with('/') {
-            String::from("/")
+    grouped
+        .into_values()
+        .map(|builder| builder.into_volume_node())
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn volume_label_for_drive(drive: &str) -> Option<String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
+
+    let mut volume_name = [0u16; 261];
+    let root = format!("{drive}\\");
+    let wide: Vec<u16> = OsStr::new(&root).encode_wide().chain(Some(0)).collect();
+    let result = unsafe {
+        GetVolumeInformationW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut volume_name),
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+
+    if result.is_ok() {
+        let len = volume_name
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(volume_name.len());
+        let name = String::from_utf16_lossy(&volume_name[..len]);
+        if name.is_empty() {
+            None
         } else {
-            String::new()
+            Some(name)
+        }
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn volume_label_for_drive(_drive: &str) -> Option<String> {
+    None
+}
+
+fn split_volume_components(path: &Path) -> (String, PathBuf, Vec<String>) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::path::{Component, Prefix};
+
+        let mut comps = path.components().peekable();
+        let mut drive: Option<String> = None;
+        let mut root = PathBuf::new();
+
+        while let Some(comp) = comps.peek() {
+            match comp {
+                Component::Prefix(prefix) => {
+                    let name = match prefix.kind() {
+                        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                            format!("{}:", (*letter as char).to_ascii_uppercase())
+                        }
+                        _ => prefix.as_os_str().to_string_lossy().to_string(),
+                    };
+                    drive = Some(name);
+                    root.push(prefix.as_os_str());
+                    comps.next();
+                }
+                Component::RootDir => {
+                    root.push(comp.as_os_str());
+                    comps.next();
+                }
+                _ => break,
+            }
+        }
+
+        let mut parts = Vec::new();
+        for comp in comps {
+            if let Component::Normal(name) = comp {
+                parts.push(name.to_string_lossy().to_string());
+            }
+        }
+
+        let drive_name = drive.unwrap_or_else(|| root.to_string_lossy().to_string());
+        let title = match volume_label_for_drive(&drive_name) {
+            Some(label) if !label.is_empty() => format!("{label} ({drive_name})"),
+            _ => drive_name.clone(),
         };
-        for (idx, part) in path.split('/').filter(|s| !s.is_empty()).enumerate() {
-            if cumulative != "/" && !cumulative.is_empty() {
-                cumulative.push('/');
+        let volume_root = if root.as_os_str().is_empty() {
+            PathBuf::from(format!("{drive_name}\\"))
+        } else {
+            root
+        };
+
+        return (title, volume_root, parts);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::path::Component;
+
+        let mut comps = path.components();
+        let mut has_root = false;
+        let mut parts = Vec::new();
+
+        while let Some(comp) = comps.next() {
+            match comp {
+                Component::RootDir => {
+                    has_root = true;
+                }
+                Component::Normal(name) => parts.push(name.to_string_lossy().to_string()),
+                _ => {}
             }
-            cumulative.push_str(part);
-            if seen.insert(cumulative.clone()) {
-                nodes.push(FolderNode {
-                    name: part.into(),
-                    full_path: cumulative.clone().into(),
-                    depth: idx as i32,
-                });
-            }
+        }
+
+        if has_root {
+            ("/".to_string(), PathBuf::from("/"), parts)
+        } else if let Some(first) = parts.first().cloned() {
+            let mut remaining = parts;
+            remaining.remove(0);
+            (first.clone(), PathBuf::from(first), remaining)
+        } else {
+            ("/".to_string(), PathBuf::from("/"), Vec::new())
+        }
+    }
+}
+
+struct VolumeBuilder {
+    display_name: String,
+    root: PathBuf,
+    children: BTreeMap<String, FolderTreeBuilder>,
+}
+
+impl VolumeBuilder {
+    fn new(display_name: String, root: PathBuf) -> Self {
+        Self {
+            display_name,
+            root,
+            children: BTreeMap::new(),
         }
     }
 
-    nodes.sort_by(|a, b| a.full_path.cmp(&b.full_path));
-    nodes
+    fn insert(&mut self, parts: &[String]) {
+        if let Some((first, rest)) = parts.split_first() {
+            let mut path = self.root.clone();
+            path.push(first);
+            let entry = self
+                .children
+                .entry(first.clone())
+                .or_insert_with(|| FolderTreeBuilder::new(first.clone(), path.clone()));
+            entry.insert(rest, path);
+        }
+    }
+
+    fn into_volume_node(self) -> VolumeNode {
+        let children_vec: Vec<FolderNode> = self
+            .children
+            .into_values()
+            .map(|child| child.into_node())
+            .collect();
+        let children_model: Rc<VecModel<FolderNode>> = Rc::new(VecModel::from(children_vec));
+        VolumeNode {
+            name: SharedString::from(self.display_name),
+            children: children_model.into(),
+        }
+    }
+}
+
+struct FolderTreeBuilder {
+    name: String,
+    full_path: PathBuf,
+    children: BTreeMap<String, FolderTreeBuilder>,
+}
+
+impl FolderTreeBuilder {
+    fn new(name: String, full_path: PathBuf) -> Self {
+        Self {
+            name,
+            full_path,
+            children: BTreeMap::new(),
+        }
+    }
+
+    fn insert(&mut self, parts: &[String], current_path: PathBuf) {
+        if let Some((first, rest)) = parts.split_first() {
+            let mut path = current_path;
+            path.push(first);
+            let entry = self
+                .children
+                .entry(first.clone())
+                .or_insert_with(|| FolderTreeBuilder::new(first.clone(), path.clone()));
+            entry.insert(rest, path);
+        }
+    }
+
+    fn into_node(self) -> FolderNode {
+        let children_vec: Vec<FolderNode> = self
+            .children
+            .into_values()
+            .map(|child| child.into_node())
+            .collect();
+        let children_model: Rc<VecModel<FolderNode>> = Rc::new(VecModel::from(children_vec));
+        FolderNode {
+            name: SharedString::from(self.name),
+            full_path: SharedString::from(self.full_path.to_string_lossy().to_string()),
+            children: children_model.into(),
+        }
+    }
+}
+
+fn selection_to_config(selection: &FolioSelection) -> FolioLastSelection {
+    let folder_path = match selection {
+        FolioSelection::Folder(path) => Some(PathBuf::from(path)),
+        _ => None,
+    };
+
+    FolioLastSelection {
+        kind: selection.kind().to_string(),
+        folder_path,
+    }
+}
+
+fn config_to_selection(snapshot: &FolioLastSelection) -> Option<FolioSelection> {
+    match snapshot.kind.as_str() {
+        "all_photos" => Some(FolioSelection::AllPhotos),
+        "last_import" => Some(FolioSelection::LastImport),
+        "folder" => snapshot
+            .folder_path
+            .as_ref()
+            .map(|p| FolioSelection::Folder(p.to_string_lossy().to_string())),
+        _ => None,
+    }
+}
+
+fn folder_exists_in_catalog(catalog_state: &CatalogState, path: &str) -> bool {
+    let guard = catalog_state.borrow();
+    let Some(session) = guard.as_ref() else {
+        return false;
+    };
+    Folder::find_by_path(&session.service.db, path)
+        .map(|f| f.is_some())
+        .unwrap_or(false)
+}
+
+fn current_catalog_path(catalog_state: &CatalogState) -> Option<PathBuf> {
+    catalog_state
+        .borrow()
+        .as_ref()
+        .map(|session| session.path.clone())
+}
+
+fn last_import_timestamp_for_catalog(
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    config_store: &ConfigStore,
+) -> Option<String> {
+    if let Some(ts) = folio_state.borrow().last_import_timestamp.clone() {
+        return Some(ts);
+    }
+
+    let catalog_path = current_catalog_path(catalog_state)?;
+    let ts = config_store.last_import_timestamp(&catalog_path)?;
+    folio_state.borrow_mut().last_import_timestamp = Some(ts.clone());
+    Some(ts)
+}
+
+fn apply_selection(
+    selection: FolioSelection,
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+    config_store: &ConfigStore,
+) {
+    {
+        let mut guard = folio_state.borrow_mut();
+        guard.current_selection = Some(selection.clone());
+    }
+
+    if let Err(err) = config_store.set_folio_selection(selection_to_config(&selection)) {
+        eprintln!("Failed to persist folio selection: {err}");
+    }
+
+    match selection.clone() {
+        FolioSelection::AllPhotos => {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_selected_virtual_collection("all_photos".into());
+                ui.set_selected_folder_path("".into());
+            }
+            load_all_photos(catalog_state, folio_state, ui_weak);
+        }
+        FolioSelection::LastImport => {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_selected_virtual_collection("last_import".into());
+                ui.set_selected_folder_path("".into());
+            }
+            let since =
+                last_import_timestamp_for_catalog(catalog_state, folio_state, config_store);
+            load_last_import(catalog_state, folio_state, ui_weak, since.as_deref());
+        }
+        FolioSelection::Folder(path) => {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_selected_folder_path(path.clone().into());
+                ui.set_selected_virtual_collection("".into());
+            }
+            load_folder_thumbnails(
+                catalog_state,
+                folio_state,
+                ui_weak,
+                Path::new(&path),
+            );
+        }
+    }
+}
+
+fn reload_current_selection(
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+    config_store: &ConfigStore,
+) {
+    let selection = folio_state.borrow().current_selection.clone();
+    if let Some(selection) = selection {
+        apply_selection(selection, catalog_state, folio_state, ui_weak, config_store);
+    }
+}
+
+fn restore_last_selection(
+    ui_weak: &slint::Weak<MainWindow>,
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    config_store: &ConfigStore,
+) {
+    let stored = config_store.last_folio_selection();
+    let mut selection = stored
+        .as_ref()
+        .and_then(config_to_selection)
+        .unwrap_or(FolioSelection::AllPhotos);
+
+    if let FolioSelection::Folder(ref path) = selection {
+        if !folder_exists_in_catalog(catalog_state, path) {
+            selection = FolioSelection::AllPhotos;
+        }
+    }
+
+    apply_selection(selection, catalog_state, folio_state, ui_weak, config_store);
+}
+
+fn build_thumbnail_items(
+    images: Vec<CatalogImage>,
+    filters: &FilterState,
+    service: &CatalogService,
+) -> (Vec<ThumbnailItem>, u64) {
+    let mut total_size = 0u64;
+    let mut items = Vec::new();
+    for img in images {
+        if !passes_filters(&img, filters) {
+            continue;
+        }
+
+        if let Some(sz) = img.filesize {
+            total_size += sz as u64;
+        }
+
+        let display_thumb = load_or_generate_thumbnail(service, &img).unwrap_or_else(placeholder_image);
+        let flag = normalize_flag_value(img.flag.as_ref());
+        let color_label = normalize_color_label_value(img.color_label.as_ref());
+
+        items.push(ThumbnailItem {
+            id: img.id as i32,
+            path: SharedString::from(img.original_path.clone()),
+            display_thumb,
+            selected: false,
+            rating: img.rating.unwrap_or(0) as i32,
+            flag: SharedString::from(flag),
+            color_label: SharedString::from(color_label),
+        });
+    }
+    (items, total_size)
+}
+
+fn apply_thumbnail_view(
+    items: Vec<ThumbnailItem>,
+    total_size: u64,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+) {
+    let count = items.len();
+    {
+        let mut guard = folio_state.borrow_mut();
+        guard.thumbnails.set_vec(items);
+        guard.reset_selection();
+    }
+
+    if let Some(ui) = ui_weak.upgrade() {
+        ui.set_thumbnails(folio_state.borrow().thumbnails.clone().into());
+        ui.set_folio_total_count(count as i32);
+        ui.set_folio_selected_count(0);
+        ui.set_folio_size_summary(human_size(total_size).into());
+        ui.set_metadata(empty_metadata());
+        ui.set_keywords_text("".into());
+        ui.set_selected_image_id(-1);
+    }
+}
+
+fn parse_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .ok()
 }
 
 fn load_folder_thumbnails(
@@ -1508,51 +2038,60 @@ fn load_folder_thumbnails(
                 return;
             }
         };
-        let mut total_size = 0u64;
-        let mut items = Vec::new();
-        for img in images {
-            if !passes_filters(&img, &filters) {
-                continue;
-            }
-
-            if let Some(sz) = img.filesize {
-                total_size += sz as u64;
-            }
-
-            let display_thumb = load_or_generate_thumbnail(&session.service, &img)
-                .unwrap_or_else(placeholder_image);
-            let flag = normalize_flag_value(img.flag.as_ref());
-            let color_label = normalize_color_label_value(img.color_label.as_ref());
-
-            items.push(ThumbnailItem {
-                id: img.id as i32,
-                path: SharedString::from(img.original_path.clone()),
-                display_thumb,
-                selected: false,
-                rating: img.rating.unwrap_or(0) as i32,
-                flag: SharedString::from(flag),
-                color_label: SharedString::from(color_label),
-            });
-        }
-        (items, total_size)
+        build_thumbnail_items(images, &filters, &session.service)
     };
 
-    let count = items.len();
-    {
-        let mut guard = folio_state.borrow_mut();
-        guard.thumbnails.set_vec(items);
-        guard.reset_selection();
-    }
+    apply_thumbnail_view(items, total_size, folio_state, ui_weak);
+}
 
-    if let Some(ui) = ui_weak.upgrade() {
-        ui.set_thumbnails(folio_state.borrow().thumbnails.clone().into());
-        ui.set_folio_total_count(count as i32);
-        ui.set_folio_selected_count(0);
-        ui.set_folio_size_summary(human_size(total_size).into());
-        ui.set_metadata(empty_metadata());
-        ui.set_keywords_text("".into());
-        ui.set_selected_image_id(-1);
-    }
+fn load_all_photos(
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+) {
+    let (items, total_size) = {
+        let guard = catalog_state.borrow();
+        let Some(session) = guard.as_ref() else {
+            return;
+        };
+        let filters = folio_state.borrow().filters.clone();
+        let images = match session.service.list_all_photos() {
+            Ok(list) => list,
+            Err(err) => {
+                eprintln!("Failed to list all photos: {err}");
+                return;
+            }
+        };
+        build_thumbnail_items(images, &filters, &session.service)
+    };
+
+    apply_thumbnail_view(items, total_size, folio_state, ui_weak);
+}
+
+fn load_last_import(
+    catalog_state: &CatalogState,
+    folio_state: &Rc<RefCell<FolioState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+    since: Option<&str>,
+) {
+    let (items, total_size) = {
+        let guard = catalog_state.borrow();
+        let Some(session) = guard.as_ref() else {
+            return;
+        };
+        let filters = folio_state.borrow().filters.clone();
+        let since_dt = since.and_then(parse_timestamp);
+        let images = match session.service.list_last_import(since_dt) {
+            Ok(list) => list,
+            Err(err) => {
+                eprintln!("Failed to list last import: {err}");
+                return;
+            }
+        };
+        build_thumbnail_items(images, &filters, &session.service)
+    };
+
+    apply_thumbnail_view(items, total_size, folio_state, ui_weak);
 }
 
 fn passes_filters(image: &CatalogImage, filters: &FilterState) -> bool {

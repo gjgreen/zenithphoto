@@ -50,6 +50,65 @@ impl CatalogService {
             .with_context(|| format!("failed to list images for folder {}", folder_path.display()))
     }
 
+    pub fn list_all_photos(&self) -> Result<Vec<Image>> {
+        query_all(
+            &self.db,
+            "SELECT
+                id, folder_id, filename, original_path, sidecar_path, sidecar_hash, filesize,
+                file_hash, file_modified_at, imported_at, captured_at, camera_make,
+                camera_model, lens_model, focal_length, aperture, shutter_speed, iso,
+                orientation, gps_latitude, gps_longitude, gps_altitude, rating, flag,
+                color_label, metadata_json, created_at, updated_at
+             FROM images
+             ORDER BY captured_at IS NULL, captured_at",
+            [],
+            Image::from_row,
+        )
+        .context("failed to list all photos")
+    }
+
+    pub fn last_import_timestamp(&self) -> Result<Option<DateTime<Utc>>> {
+        query_optional(
+            &self.db,
+            "SELECT MAX(imported_at) FROM images",
+            [],
+            |row| {
+                let raw: Option<String> = row.get(0)?;
+                if let Some(raw) = raw {
+                    let parsed = DateTime::parse_from_rfc3339(&raw)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .with_context(|| format!("failed to parse imported_at timestamp {raw}"))?;
+                    Ok(Some(parsed))
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+        .context("failed to read last import timestamp")
+    }
+
+    pub fn list_last_import(&self, since: Option<DateTime<Utc>>) -> Result<Vec<Image>> {
+        let Some(cutoff) = since.or(self.last_import_timestamp()?) else {
+            return Ok(Vec::new());
+        };
+
+        query_all(
+            &self.db,
+            "SELECT
+                id, folder_id, filename, original_path, sidecar_path, sidecar_hash, filesize,
+                file_hash, file_modified_at, imported_at, captured_at, camera_make,
+                camera_model, lens_model, focal_length, aperture, shutter_speed, iso,
+                orientation, gps_latitude, gps_longitude, gps_altitude, rating, flag,
+                color_label, metadata_json, created_at, updated_at
+             FROM images
+             WHERE imported_at >= ?1
+             ORDER BY captured_at IS NULL, captured_at",
+            params![to_rfc3339(cutoff)],
+            Image::from_row,
+        )
+        .context("failed to list last import images")
+    }
+
     pub fn load_thumbnail(&self, image_id: i64) -> Result<Option<Thumbnail>> {
         query_optional(
             &self.db,
@@ -147,6 +206,11 @@ impl CatalogService {
     }
 
     pub fn import_image(&self, path: &Path) -> Result<Image> {
+        let now = Utc::now();
+        self.import_image_at(path, now)
+    }
+
+    pub fn import_image_at(&self, path: &Path, imported_at: DateTime<Utc>) -> Result<Image> {
         let metadata = fs::metadata(path)
             .with_context(|| format!("failed to read file metadata for {:?}", path))?;
         let folder_path = Self::parent_path(path);
@@ -176,7 +240,7 @@ impl CatalogService {
             filesize: Some(metadata.len() as i64),
             file_hash: Some(file_hash),
             file_modified_at: Self::modified_time(&metadata),
-            imported_at: now,
+            imported_at,
             captured_at: None,
             camera_make: None,
             camera_model: None,

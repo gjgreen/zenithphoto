@@ -23,6 +23,7 @@ walkdir = "2.5"
 futures = "0.3"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg", "tiff"] }
 anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
 
 [build-dependencies]
 slint-build = "1.8"
@@ -32,3 +33,4 @@ tempfile = "3.10"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }

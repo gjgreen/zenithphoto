@@ -7,6 +7,7 @@ use std::sync::{
 
 use anyhow::{anyhow, Context, Result};
 use catalog::services::CatalogService;
+use chrono::{DateTime, Utc};
 use slint::{Image as SlintImage, Rgba8Pixel, SharedPixelBuffer};
 use walkdir::WalkDir;
 
@@ -86,6 +87,7 @@ pub struct ImportReport {
     pub duplicates: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, String)>,
     pub canceled: bool,
+    pub batch_started_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug)]
@@ -180,6 +182,7 @@ pub async fn import_images_with_callbacks(
     callbacks: ImportCallbacks,
 ) -> Result<ImportReport> {
     let mut report = ImportReport::default();
+    let batch_started_at = Utc::now();
     let normalized_keywords = normalize_keywords(keywords);
     let dest_dir = match method {
         ImportMethod::Add => None,
@@ -255,7 +258,7 @@ pub async fn import_images_with_callbacks(
             format!("Cataloging {}", target_path.display()),
         );
 
-        let image = match service.import_image(&target_path) {
+        let image = match service.import_image_at(&target_path, batch_started_at) {
             Ok(img) => img,
             Err(err) => {
                 callbacks.emit_error(target_path.clone(), err.to_string());
@@ -304,6 +307,7 @@ pub async fn import_images_with_callbacks(
         }
 
         report.imported += 1;
+        report.batch_started_at.get_or_insert(batch_started_at);
     }
 
     Ok(report)

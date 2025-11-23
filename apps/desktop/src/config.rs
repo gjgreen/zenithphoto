@@ -1,5 +1,6 @@
 use catalog::CatalogPath;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -20,9 +21,20 @@ pub enum ConfigError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolioLastSelection {
+    pub kind: String,
+    #[serde(default)]
+    pub folder_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub recent_catalogs: Vec<PathBuf>,
     pub last_catalog: Option<PathBuf>,
+    #[serde(default)]
+    pub folio_last_selection: Option<FolioLastSelection>,
+    #[serde(default)]
+    pub last_import_timestamps: HashMap<PathBuf, String>,
 }
 
 impl Default for AppConfig {
@@ -30,6 +42,8 @@ impl Default for AppConfig {
         Self {
             recent_catalogs: Vec::new(),
             last_catalog: None,
+            folio_last_selection: None,
+            last_import_timestamps: HashMap::new(),
         }
     }
 }
@@ -97,6 +111,44 @@ impl ConfigStore {
             cfg.last_catalog = None;
             true
         })
+    }
+
+    pub fn set_folio_selection(&self, selection: FolioLastSelection) -> Result<AppConfig> {
+        self.update(|cfg| {
+            cfg.folio_last_selection = Some(selection);
+            true
+        })
+    }
+
+    pub fn last_folio_selection(&self) -> Option<FolioLastSelection> {
+        self.inner
+            .lock()
+            .expect("config poisoned")
+            .folio_last_selection
+            .clone()
+    }
+
+    pub fn record_last_import(
+        &self,
+        catalog: impl AsRef<Path>,
+        timestamp: &str,
+    ) -> Result<AppConfig> {
+        let normalized = CatalogPath::new(catalog).into_path();
+        let ts = timestamp.to_string();
+        self.update(|cfg| {
+            cfg.last_import_timestamps.insert(normalized.clone(), ts.clone());
+            true
+        })
+    }
+
+    pub fn last_import_timestamp(&self, catalog: impl AsRef<Path>) -> Option<String> {
+        let normalized = CatalogPath::new(catalog).into_path();
+        self.inner
+            .lock()
+            .expect("config poisoned")
+            .last_import_timestamps
+            .get(&normalized)
+            .cloned()
     }
 
     fn update<F>(&self, mut fun: F) -> Result<AppConfig>

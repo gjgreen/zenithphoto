@@ -3,7 +3,17 @@ import { Button, ComboBox, ScrollView, SpinBox, TextEdit } from "std-widgets.sli
 export struct FolderNode {
     name: string,
     full_path: string,
-    depth: int,
+    children: [FolderNode],
+}
+
+export struct VolumeNode {
+    name: string,
+    children: [FolderNode],
+}
+
+export struct VirtualCollectionItem {
+    id: string,
+    label: string,
 }
 
 export struct ThumbnailItem {
@@ -232,8 +242,80 @@ component MetaRow inherits HorizontalLayout {
     Text { text: value; wrap: word-wrap; color: #d0d0d0; horizontal-stretch: 1; }
 }
 
+component VirtualCollectionRow inherits Rectangle {
+    in property <string> label;
+    in property <string> kind;
+    in property <string> selected_kind;
+    callback activated(kind: string);
+
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: 4px;
+    background: selected_kind == kind ? #1f3a70 : #181818;
+    animate background { duration: 120ms; }
+
+    HorizontalLayout {
+        padding: 6px;
+        Text { text: label; color: #d0d0d0; }
+    }
+
+    TouchArea { clicked => activated(kind); }
+}
+
+component FolderBranch inherits VerticalLayout {
+    in property <FolderNode> node;
+    in property <int> depth: 0;
+    in property <string> selected_path;
+    callback folder_clicked(path: string);
+
+    spacing: 2px;
+
+    Rectangle {
+        height: 28px;
+        horizontal-stretch: 1;
+        border-radius: 4px;
+        background: selected_path == node.full_path ? #1f3a70 : #181818;
+        animate background { duration: 120ms; }
+
+        HorizontalLayout {
+            spacing: 6px;
+            padding: 6px;
+
+            Rectangle { width: depth * 12px; height: 1px; opacity: 0; }
+            Text { text: node.name; color: #d0d0d0; }
+        }
+
+        TouchArea { clicked => folder_clicked(node.full_path); }
+    }
+
+    for child in node.children: FolderBranch {
+        node: child;
+        depth: depth + 1;
+        selected_path: root.selected_path;
+        folder_clicked(path) => root.folder_clicked(path);
+    }
+}
+
+component VolumeSection inherits VerticalLayout {
+    in property <VolumeNode> volume;
+    in property <string> selected_path;
+    callback folder_clicked(path: string);
+
+    spacing: 4px;
+
+    Text { text: volume.name; color: #8fb1ff; font-weight: 600; }
+
+    for child in volume.children: FolderBranch {
+        node: child;
+        depth: 1;
+        selected_path: root.selected_path;
+        folder_clicked(path) => root.folder_clicked(path);
+    }
+}
+
 export component FolioScreen inherits Rectangle {
-    in-out property <[FolderNode]> folder_tree;
+    in-out property <[VolumeNode]> volumes;
+    in-out property <[VirtualCollectionItem]> virtual_collections_model;
     in-out property <[ThumbnailItem]> thumbnails;
     in-out property <ImageMetadata> metadata;
     in-out property <string> filter_search;
@@ -245,8 +327,12 @@ export component FolioScreen inherits Rectangle {
     in-out property <string> size_summary;
     in-out property <string> keywords_text;
     in-out property <int> selected_image_id: -1;
+    in-out property <string> catalog_name;
+    in-out property <string> selected_folder_path;
+    in-out property <string> selected_virtual_collection;
 
     callback folder_selected(path: string);
+    callback virtual_collection_selected(kind: string);
     callback thumbnail_selected(image_id: int, range_select: bool, toggle: bool);
     callback thumbnail_activated(image_id: int);
     callback rating_changed(image_id: int, new_rating: int);
@@ -269,42 +355,58 @@ export component FolioScreen inherits Rectangle {
 
         // Folder tree
         Rectangle {
-            width: 260px;
+            width: 280px;
             border-radius: 8px;
             background: #151515;
 
             VerticalLayout {
                 padding: 10px;
-                spacing: 8px;
-                Text { text: "Folio"; font-weight: 700; color: #e0e0e0; }
+                spacing: 10px;
+                Text {
+                    text: "Catalog: " + catalog_name;
+                    font-weight: 700;
+                    color: #e0e0e0;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    for item in root.virtual_collections_model: VirtualCollectionRow {
+                        label: item.label;
+                        kind: item.id;
+                        selected_kind: root.selected_virtual_collection;
+                        activated(kind) => {
+                            root.selected_virtual_collection = kind;
+                            root.selected_folder_path = "";
+                            root.virtual_collection_selected(kind);
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: #333; horizontal-stretch: 1; }
+
                 ScrollView {
                     vertical-stretch: 1;
-                    Rectangle {
+                    viewport-width: tree_container.width;
+                    viewport-height: tree_container.height;
+                    tree_container := Rectangle {
                         horizontal-stretch: 1;
                         VerticalLayout {
-                            spacing: 4px;
-                            for node in root.folder_tree: Rectangle {
-                                height: 28px;
-                                border-radius: 4px;
-                                background: #181818;
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    padding: 6px;
+                            spacing: 8px;
 
-                                    Rectangle {
-                                        width: node.depth * 12px;
-                                        height: 1px;
-                                        opacity: 0;
-                                    }
+                            if root.volumes.length == 0: Text {
+                                text: "No folders yet";
+                                color: #8c8c8c;
+                            }
 
-                                    Text {
-                                        text: node.name;
-                                        color: #d0d0d0;
-                                    }
-                                }
-
-                                TouchArea {
-                                    clicked => root.folder_selected(node.full_path);
+                            for volume in root.volumes: VolumeSection {
+                                volume: volume;
+                                selected_path: root.selected_folder_path;
+                                folder_clicked(path) => {
+                                    root.selected_folder_path = path;
+                                    root.selected_virtual_collection = "";
+                                    root.folder_selected(path);
                                 }
                             }
                         }

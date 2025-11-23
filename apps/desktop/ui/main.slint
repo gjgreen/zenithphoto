@@ -1,7 +1,7 @@
 import { CatalogDialog } from "catalog_dialog.slint";
 import { ImportPhotosScreen } from "ImportPhotosScreen.slint";
 import { MainTabs } from "MainTabs.slint";
-import { FolioScreen, FolderNode, ThumbnailItem, ImageMetadata } from "FolioScreen.slint";
+import { FolioScreen, VolumeNode, VirtualCollectionItem, ThumbnailItem, ImageMetadata } from "FolioScreen.slint";
 import { RefineScreen } from "RefineScreen.slint";
 export { CatalogDialog, ImportPhotosScreen }
 
@@ -15,7 +15,11 @@ export component MainWindow inherits Window {
     in-out property <int> current-tab: 0; // 0 = Folio, 1 = Refine
     in-out property <string> current-path;
     in-out property <[string]> recent-catalogs;
-    in-out property <[FolderNode]> folder-tree;
+    in-out property <[VolumeNode]> volumes;
+    in-out property <[VirtualCollectionItem]> virtual-collections;
+    in-out property <string> selected-folder-path;
+    in-out property <string> selected-virtual-collection;
+    in-out property <string> catalog-name;
     in-out property <[ThumbnailItem]> thumbnails;
     in-out property <ImageMetadata> metadata;
     in-out property <string> filter-search: "";
@@ -46,6 +50,7 @@ export component MainWindow inherits Window {
     callback exit-requested();
 
     callback folder-selected(path: string);
+    callback virtual-collection-selected(kind: string);
     callback thumbnail-selected(image_id: int, range_select: bool, toggle: bool);
     callback thumbnail-activated(image_id: int);
     callback rating-changed(image_id: int, new_rating: int);
@@ -187,7 +192,11 @@ export component MainWindow inherits Window {
             }
 
             if root.current-tab == 0: FolioScreen {
-                folder_tree <=> root.folder-tree;
+                volumes <=> root.volumes;
+                virtual_collections_model <=> root.virtual-collections;
+                selected_folder_path <=> root.selected-folder-path;
+                selected_virtual_collection <=> root.selected-virtual-collection;
+                catalog_name <=> root.catalog-name;
                 thumbnails <=> root.thumbnails;
                 metadata <=> root.metadata;
                 filter_search <=> root.filter-search;
@@ -201,6 +210,7 @@ export component MainWindow inherits Window {
                 selected_image_id <=> root.selected-image-id;
 
                 folder_selected(path) => root.folder-selected(path);
+                virtual_collection_selected(kind) => root.virtual-collection-selected(kind);
                 thumbnail_selected(image_id, range_select, toggle) => root.thumbnail-selected(image_id, range_select, toggle);
                 thumbnail_activated(image_id) => {
                     root.selected-image-id = image_id;
