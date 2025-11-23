@@ -565,6 +565,8 @@ export component FolioScreen inherits Rectangle {
                     horizontal-stretch: 1;
                     vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
                     horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+                    viewport-height: grid_container.preferred-height;
+                    viewport-width: grid_container.preferred-width;
 
                     grid_container := Rectangle {
                         x: 0;
@@ -629,6 +631,8 @@ export component FolioScreen inherits Rectangle {
                         Text { text: root.total_count + " images"; color: #c0c0c0; }
                         Text { text: root.selected_count + " selected"; color: #c0c0c0; }
                         Text { text: root.size_summary; color: #a0a0a0; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text { text: "telltale: scroll-fix v3"; color: #666; font-size: 10px; }
                     }
                 }
             }
