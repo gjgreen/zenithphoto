@@ -564,6 +564,7 @@ export component FolioScreen inherits Rectangle {
                     vertical-stretch: 1;
                     horizontal-stretch: 1;
                     clip: true;
+                    background: #0c0c0c;
 
                     thumb_flick := Flickable {
                         width: parent.width;
@@ -623,27 +624,28 @@ export component FolioScreen inherits Rectangle {
                             }
                         }
 
-                        Text {
-                            text: "grid: " + (grid_container.width / 1px) + "x" + (grid_container.height / 1px) + " cols=" + grid_container.columns + " rows=" + grid_container.rows;
-                            color: #888;
-                            font-size: 10px;
-                            x: 6px;
-                            y: 6px;
-                        }
-
                         // DEBUG overlay to surface layout sizing
                         Rectangle {
-                            x: 0;
-                            y: 0;
-                            width: 380px;
-                            height: 22px;
-                            background: #222222aa;
+                            x: 8px;
+                            y: 8px;
+                            width: 520px;
+                            height: 60px;
+                            background: #ff007744;
+                            border-color: #ff00ff;
+                            border-width: 1px;
                             Text {
-                                text: "grid: " + (grid_container.width / 1px) + "x" + (grid_container.height / 1px) + " cols=" + grid_container.columns + " rows=" + grid_container.rows;
-                                color: #f0f0f0;
-                                font-size: 11px;
+                                text: "panel=" + (grid_panel.width / 1px) + "x" + (grid_panel.height / 1px)
+                                    + " flick=" + (thumb_flick.width / 1px) + "x" + (thumb_flick.height / 1px)
+                                    + " vp=" + (thumb_flick.viewport-width / 1px) + "x" + (thumb_flick.viewport-height / 1px)
+                                    + " grid=" + (grid_container.width / 1px) + "x" + (grid_container.height / 1px)
+                                    + " cols=" + grid_container.columns + " rows=" + grid_container.rows;
+                                color: #ffffff;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                                vertical-stretch: 1;
                                 padding-left: 8px;
-                                padding-top: 4px;
+                                padding-top: 6px;
                             }
                         }
                     }
