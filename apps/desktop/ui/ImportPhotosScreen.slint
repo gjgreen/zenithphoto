@@ -1,8 +1,10 @@
 import { Button, CheckBox, ComboBox, ProgressIndicator, ScrollView, TextEdit } from "std-widgets.slint";
+import { FolderRow, FolderTreeRow } from "FolioScreen.slint";
 
 export struct ImportThumbnail {
     id: int,
     path: string,
+    display_name: string,
     display_thumb: image,
     selected: bool,
     checked: bool,
@@ -12,6 +14,7 @@ export struct ImportThumbnail {
 
 component ImportThumbnailCard inherits Rectangle {
     in property <string> path;
+    in property <string> display_name;
     in property <image> thumbnail;
     in property <bool> selected: false;
     in property <bool> checked: false;
@@ -44,7 +47,7 @@ component ImportThumbnailCard inherits Rectangle {
         // Selection area (thumbnail + label)
         touch_area := TouchArea {
             width: parent.width;
-            height: root.thumb-size + 40px;
+            height: root.thumb-size + 32px;
             enabled: root.selectable;
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.up) {
@@ -87,7 +90,7 @@ component ImportThumbnailCard inherits Rectangle {
                 }
 
                 Text {
-                    text: path;
+                    text: display_name;
                     font-size: 11px;
                     wrap: no-wrap;
                     overflow: elide;
@@ -101,7 +104,7 @@ component ImportThumbnailCard inherits Rectangle {
             CheckBox {
                 text: checked ? "Include" : "Skip";
                 checked: root.checked;
-                enabled: root.selectable && !root.already-imported;
+                enabled: root.selectable;
                 toggled => {
                     if (!root.selected) {
                         thumbnail_clicked(false, false);
@@ -125,19 +128,22 @@ export component ImportPhotosScreen inherits Window {
     title: "Import Photos";
 
     in-out property <[ImportThumbnail]> thumbnails;
-    in-out property <[string]> directories;
+    in-out property <[FolderTreeRow]> folder_tree;
     in-out property <[string]> selected_paths;
     in-out property <[string]> error_messages;
     in-out property <string> selected_directory;
     in-out property <string> destination_directory;
     in-out property <string> keywords;
     in-out property <bool> allow_duplicates: false;
+    in-out property <bool> all_selectable_checked: false;
     in-out property <bool> show_destination: false;
     in-out property <bool> importing: false;
     in-out property <float> progress: 0.0;
     in-out property <string> status_text;
 
     callback directory_selected(path: string);
+    callback allow_duplicates_changed(allow: bool);
+    callback folder_toggled(path: string);
     callback browse_for_directory();
     callback browse_for_destination();
     callback thumbnail_clicked(image_id: int, shift: bool, ctrl: bool);
@@ -206,41 +212,45 @@ export component ImportPhotosScreen inherits Window {
 
                 // Left: directory browser
                 Rectangle {
-                    width: 260px;
+                    width: 300px;
                     background: #181818;
                     border-radius: 6px;
-                    HorizontalLayout {
-                        padding: 8px;
-                        VerticalLayout {
-                            spacing: 8px;
-                            Text { text: "Folders"; font-weight: 600; }
-                            Button {
-                                text: "Choose Folder…";
-                                enabled: !root.importing;
-                                clicked => { root.browse_for_directory(); }
-                            }
-                            Text {
-                                text: root.selected_directory;
-                                wrap: word-wrap;
-                                font-size: 10px;
-                                color: #c0c0c0;
-                            }
-                            ScrollView {
-                                vertical-stretch: 1;
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    vertical-stretch: 1;
-                                    VerticalLayout {
-                                        spacing: 4px;
-                                        for dir_path[idx] in root.directories: Button {
-                                            text: dir_path;
-                                            horizontal-stretch: 1;
-                                            enabled: !root.importing;
-                                            clicked => {
-                                                root.selected_directory = dir_path;
-                                                root.directory_selected(dir_path);
-                                            }
-                                        }
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 10px;
+                        Text { text: "Source"; font-weight: 600; color: #f0f0f0; }
+                        Text {
+                            text: root.selected_directory;
+                            wrap: word-wrap;
+                            font-size: 11px;
+                            color: #c0c0c0;
+                        }
+                        Rectangle { height: 1px; horizontal-stretch: 1; background: #2a2a2a; }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            horizontal-stretch: 1;
+                            viewport-height: folder_list.preferred-height;
+                            viewport-width: folder_list.preferred-width;
+                            folder_list := VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+
+                                if root.folder_tree.length == 0: Text {
+                                    text: "No folders found";
+                                    color: #8c8c8c;
+                                }
+
+                                for folder in root.folder_tree: FolderRow {
+                                    name: folder.name;
+                                    expanded: folder.expanded;
+                                    level: folder.level;
+                                    has_children: folder.has_children;
+                                    selected: root.selected_directory == folder.full_path;
+
+                                    toggle => root.folder_toggled(folder.full_path);
+                                    activate => {
+                                        root.selected_directory = folder.full_path;
+                                        root.directory_selected(folder.full_path);
                                     }
                                 }
                             }
@@ -253,17 +263,23 @@ export component ImportPhotosScreen inherits Window {
                     background: #161616;
                     border-radius: 6px;
                     horizontal-stretch: 1;
+                    clip: true;
+                    property <length> inner_width: Math.max(self.width - root.thumb_padding * 2, 0px);
+
                     thumbnail_scroll := ScrollView {
-                        vertical-stretch: 1;
+                        width: parent.width;
+                        height: parent.height;
+                        viewport-width: grid_container.width;
+                        viewport-height: grid_container.height;
+                        vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
 
                         grid_container := Rectangle {
                             property <float> columns: {
-                                let available = import_grid_panel.width - root.thumb_padding * 2;
+                                let available = import_grid_panel.inner_width + root.thumb_gap;
                                 let cell = root.card_width + root.thumb_gap;
                                 let count = Math.floor(available / cell);
-                                let min_cols = root.grid_columns;
-                                let chosen = count < 1 ? 1 : count;
-                                chosen < min_cols ? min_cols : chosen;
+                                if count < 1 { 1 } else { count }
                             }
                             property <float> rows: {
                                 let total = root.thumbnails.length;
@@ -276,13 +292,16 @@ export component ImportPhotosScreen inherits Window {
                                 + self.rows * root.card_height
                                 + (self.rows - 1) * root.thumb_gap;
 
-                            width: self.content-width > import_grid_panel.width ? self.content-width : import_grid_panel.width;
+                            width: import_grid_panel.width;
                             height: self.content-height;
+                            preferred-width: self.width;
+                            preferred-height: self.content-height;
 
                             for thumb[idx] in root.thumbnails: ImportThumbnailCard {
                                 thumb-size: root.thumb_size;
                                 card-width: root.card_width;
                                 card-height: root.card_height;
+                                display_name: thumb.display_name;
                                 selected: thumb.selected;
                                 checked: thumb.checked;
                                 path: thumb.path;
@@ -300,50 +319,45 @@ export component ImportPhotosScreen inherits Window {
                     }
                 }
 
-                // Right: destination picker
+                // Right: destination picker + keywords
                 Rectangle {
-                    width: 280px;
-                    visible: root.show_destination;
+                    width: 320px;
                     background: #181818;
                     border-radius: 6px;
-                    HorizontalLayout {
-                        padding: 8px;
-                        VerticalLayout {
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 12px;
+
+                        if root.show_destination: VerticalLayout {
                             spacing: 8px;
                             Text { text: "Destination"; font-weight: 600; }
                             Button {
-                                text: "Choose Destination…";
+                                text: "Choose Destination...";
                                 enabled: !root.importing;
                                 clicked => root.browse_for_destination();
                             }
                             Text {
                                 text: root.destination_directory;
                                 wrap: word-wrap;
-                                font-size: 10px;
+                                font-size: 11px;
                                 color: #c0c0c0;
                             }
+                            Rectangle { height: 1px; horizontal-stretch: 1; background: #2a2a2a; }
+                        }
+
+                        Text { text: "Keywords (comma-separated)"; font-weight: 600; }
+                        keywords_field := TextEdit {
+                            text <=> root.keywords;
+                            wrap: word-wrap;
+                            read-only: root.importing;
+                            vertical-stretch: 1;
                         }
                     }
                 }
-            }
 
-            // Keywords entry
-            Rectangle {
-                background: #181818;
-                border-radius: 6px;
-                VerticalLayout {
-                    padding: 8px;
-                    spacing: 6px;
-                    Text { text: "Keywords (comma-separated)"; font-weight: 600; }
-                    keywords_field := TextEdit {
-                        text <=> root.keywords;
-                        wrap: word-wrap;
-                        read-only: root.importing;
-                        vertical-stretch: 1;
-                    }
-                }
             }
-
+        
             // Footer controls
             Rectangle {
                 height: 90px;
@@ -368,6 +382,7 @@ export component ImportPhotosScreen inherits Window {
                             CheckBox {
                                 text: "Check / Uncheck All";
                                 enabled: !root.importing;
+                                checked <=> root.all_selectable_checked;
                                 toggled => {
                                     root.select_all_requested(self.checked);
                                 }
@@ -376,6 +391,7 @@ export component ImportPhotosScreen inherits Window {
                                 text: "Import duplicates";
                                 enabled: !root.importing;
                                 checked <=> root.allow_duplicates;
+                                toggled => root.allow_duplicates_changed(self.checked);
                             }
                             Text {
                                 text: "Selected " + root.selected_paths.length + " / " + root.thumbnails.length;
@@ -454,3 +470,9 @@ export component ImportPhotosScreen inherits Window {
     }
 }
 }
+
+
+
+
+
+

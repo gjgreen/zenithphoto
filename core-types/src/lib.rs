@@ -21,3 +21,5 @@ pub struct PreviewImage {
     /// RGBA8, row-major.
     pub data: Vec<u8>,
 }
+
+pub mod raw_jpeg;

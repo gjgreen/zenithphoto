@@ -1,15 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{BufReader, Cursor, Read};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use blake3::Hasher;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
+use core_types::raw_jpeg::{extract_exif_segment, find_embedded_jpeg};
+use exif::{Reader, Tag, Value as ExifValue};
 use image::imageops::{overlay, FilterType};
-use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+use image::{DynamicImage, ImageBuffer, ImageOutputFormat, RgbaImage};
+use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat};
+use rawloader::{decode_file as decode_raw_file, Orientation as RawOrientation};
 use rusqlite::params;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::db::search;
 use crate::db::{
@@ -97,22 +102,17 @@ impl CatalogService {
     }
 
     pub fn last_import_timestamp(&self) -> Result<Option<DateTime<Utc>>> {
-        query_one(
-            &self.db,
-            "SELECT MAX(imported_at) FROM images",
-            [],
-            |row| {
-                let raw: Option<String> = row.get(0)?;
-                if let Some(raw) = raw {
-                    let parsed = DateTime::parse_from_rfc3339(&raw)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .with_context(|| format!("failed to parse imported_at timestamp {raw}"))?;
-                    Ok(Some(parsed))
-                } else {
-                    Ok(None)
-                }
-            },
-        )
+        query_one(&self.db, "SELECT MAX(imported_at) FROM images", [], |row| {
+            let raw: Option<String> = row.get(0)?;
+            if let Some(raw) = raw {
+                let parsed = DateTime::parse_from_rfc3339(&raw)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .with_context(|| format!("failed to parse imported_at timestamp {raw}"))?;
+                Ok(Some(parsed))
+            } else {
+                Ok(None)
+            }
+        })
         .context("failed to read last import timestamp")
     }
 
@@ -234,6 +234,17 @@ impl CatalogService {
         Ok(())
     }
 
+    pub fn update_sidecar_path(&self, image_id: i64, sidecar_path: Option<&Path>) -> Result<()> {
+        let normalized = sidecar_path.map(|p| p.to_string_lossy().to_string());
+        self.db
+            .execute(
+                "UPDATE images SET sidecar_path = ?1, updated_at = ?2 WHERE id = ?3",
+                params![normalized, to_rfc3339(Utc::now()), image_id],
+            )
+            .with_context(|| format!("failed to update sidecar path for image_id={image_id}"))?;
+        Ok(())
+    }
+
     pub fn import_image(&self, path: &Path) -> Result<Image> {
         let now = Utc::now();
         self.import_image_at(path, now)
@@ -247,7 +258,11 @@ impl CatalogService {
         let file_hash = Self::compute_file_hash(path)
             .with_context(|| format!("failed to hash file {:?}", path))?;
 
-        let metadata_json = match self.extract_exif_metadata(path)? {
+        let exif_data = self.extract_exif_metadata(path)?;
+        let metadata_json = match exif_data
+            .as_ref()
+            .and_then(|data| data.metadata_json.clone())
+        {
             Some(json) => Some(json),
             None => self.scan_raw_metadata(path)?,
         };
@@ -259,7 +274,7 @@ impl CatalogService {
             .to_string();
 
         let now = Utc::now();
-        let image = Image {
+        let mut image = Image {
             id: 0,
             folder_id: folder.id,
             filename,
@@ -289,6 +304,21 @@ impl CatalogService {
             created_at: now,
             updated_at: now,
         };
+
+        if let Some(exif) = exif_data {
+            image.captured_at = exif.captured_at;
+            image.camera_make = exif.camera_make;
+            image.camera_model = exif.camera_model;
+            image.lens_model = exif.lens_model;
+            image.focal_length = exif.focal_length;
+            image.aperture = exif.aperture;
+            image.shutter_speed = exif.shutter_speed;
+            image.iso = exif.iso;
+            image.orientation = exif.orientation;
+            image.gps_latitude = exif.gps_latitude;
+            image.gps_longitude = exif.gps_longitude;
+            image.gps_altitude = exif.gps_altitude;
+        }
 
         let id = image.insert(&self.db)?;
         let mut saved = image;
@@ -636,7 +666,98 @@ impl CatalogService {
     }
 
     fn load_image_for_thumbnail(path: &Path) -> Result<DynamicImage> {
-        image::open(path).with_context(|| format!("failed to decode image {:?}", path))
+        match catch_unwind(AssertUnwindSafe(|| image::open(path))) {
+            Ok(Ok(img)) => Ok(img),
+            Ok(Err(open_err)) => {
+                if let Some(bytes) = find_embedded_jpeg(path)? {
+                    Self::decode_embedded_jpeg(&bytes).with_context(|| {
+                        format!("failed to decode embedded JPEG preview for {:?}", path)
+                    })
+                } else {
+                    Err(anyhow!(open_err)).with_context(|| {
+                        format!(
+                            "failed to decode image and no embedded preview found: {:?}",
+                            path
+                        )
+                    })
+                }
+            }
+            Err(_) => Err(anyhow!("image::open panicked for {:?}", path)),
+        }
+    }
+
+    fn decode_embedded_jpeg(bytes: &[u8]) -> Result<DynamicImage> {
+        let mut decoder = JpegDecoder::new(Cursor::new(bytes));
+        let pixels = decoder
+            .decode()
+            .map_err(|err| anyhow!("embedded JPEG decode failed: {err}"))?;
+        let info = decoder
+            .info()
+            .ok_or_else(|| anyhow!("embedded JPEG metadata missing"))?;
+        let dyn_img = match info.pixel_format {
+            PixelFormat::L8 => {
+                let buffer = ImageBuffer::from_vec(info.width as u32, info.height as u32, pixels)
+                    .ok_or_else(|| anyhow!("embedded JPEG luma buffer size mismatch"))?;
+                DynamicImage::ImageLuma8(buffer)
+            }
+            PixelFormat::RGB24 => {
+                let buffer = ImageBuffer::from_vec(info.width as u32, info.height as u32, pixels)
+                    .ok_or_else(|| anyhow!("embedded JPEG RGB buffer size mismatch"))?;
+                DynamicImage::ImageRgb8(buffer)
+            }
+            PixelFormat::CMYK32 => {
+                let mut rgb = Vec::with_capacity((info.width * info.height * 3) as usize);
+                for chunk in pixels.chunks_exact(4) {
+                    let c = chunk[0] as f32 / 255.0;
+                    let m = chunk[1] as f32 / 255.0;
+                    let y = chunk[2] as f32 / 255.0;
+                    let k = chunk[3] as f32 / 255.0;
+                    let r = (1.0 - (c * (1.0 - k) + k)) * 255.0;
+                    let g = (1.0 - (m * (1.0 - k) + k)) * 255.0;
+                    let b = (1.0 - (y * (1.0 - k) + k)) * 255.0;
+                    rgb.push(r.clamp(0.0, 255.0) as u8);
+                    rgb.push(g.clamp(0.0, 255.0) as u8);
+                    rgb.push(b.clamp(0.0, 255.0) as u8);
+                }
+                let buffer = ImageBuffer::from_vec(info.width as u32, info.height as u32, rgb)
+                    .ok_or_else(|| anyhow!("embedded JPEG CMYK buffer size mismatch"))?;
+                DynamicImage::ImageRgb8(buffer)
+            }
+            other => {
+                return Err(anyhow!(
+                    "unsupported embedded JPEG pixel format: {:?}",
+                    other
+                ))
+            }
+        };
+        Ok(dyn_img)
+    }
+
+    fn extract_raw_metadata(&self, path: &Path) -> Result<Option<ExtractedExif>> {
+        match decode_raw_file(path) {
+            Ok(raw) => {
+                let mut summary = ExtractedExif::default();
+                if let Some(make) = sanitize_non_empty(&raw.clean_make)
+                    .or_else(|| sanitize_non_empty(&raw.make))
+                {
+                    summary.camera_make = Some(make);
+                }
+                if let Some(model) = sanitize_non_empty(&raw.clean_model)
+                    .or_else(|| sanitize_non_empty(&raw.model))
+                {
+                    summary.camera_model = Some(model);
+                }
+                summary.orientation = raw_orientation_to_tag(raw.orientation);
+                Ok(Some(summary))
+            }
+            Err(err) => {
+                eprintln!(
+                    "RAW metadata extraction failed for {}: {err}",
+                    path.display()
+                );
+                Ok(None)
+            }
+        }
     }
 
     fn thumbnail_bytes(img: &DynamicImage, max_dim: u32) -> Result<Vec<u8>> {
@@ -652,23 +773,194 @@ impl CatalogService {
     }
 
     fn letterboxed_thumbnail(img: &DynamicImage, max_dim: u32) -> RgbaImage {
-        let resized = img.resize(max_dim, max_dim, FilterType::Lanczos3).to_rgba8();
+        let resized = img
+            .resize(max_dim, max_dim, FilterType::Lanczos3)
+            .to_rgba8();
         let (w, h) = resized.dimensions();
         if w == max_dim && h == max_dim {
             return resized;
         }
 
-        let mut canvas =
-            RgbaImage::from_pixel(max_dim, max_dim, image::Rgba([16, 16, 16, 255]));
+        let mut canvas = RgbaImage::from_pixel(max_dim, max_dim, image::Rgba([16, 16, 16, 255]));
         let offset_x = (max_dim - w) / 2;
         let offset_y = (max_dim - h) / 2;
         overlay(&mut canvas, &resized, offset_x.into(), offset_y.into());
         canvas
     }
 
-    fn extract_exif_metadata(&self, _path: &Path) -> Result<Option<Value>> {
-        // TODO: Integrate EXIF extraction (e.g. via rexiv2) and populate metadata_json.
-        Ok(None)
+    fn extract_exif_metadata(&self, path: &Path) -> Result<Option<ExtractedExif>> {
+        let file = fs::File::open(path)
+            .with_context(|| format!("failed to open {} for EXIF parsing", path.display()))?;
+        let mut reader = BufReader::new(file);
+        let exif = match Reader::new().read_from_container(&mut reader) {
+            Ok(exif) => exif,
+            Err(err) => {
+                if let Some(bytes) = find_embedded_jpeg(path)
+                    .with_context(|| format!("failed to locate embedded preview in {}", path.display()))?
+                {
+                    if let Some(segment) = extract_exif_segment(&bytes) {
+                        match Reader::new().read_raw(segment) {
+                            Ok(exif) => exif,
+                            Err(inner) => {
+                                eprintln!(
+                                    "EXIF parse failed for {} (embedded JPEG): {inner}",
+                                    path.display()
+                                );
+                                return self.extract_raw_metadata(path);
+                            }
+                        }
+                    } else {
+                        let mut cursor = Cursor::new(bytes);
+                        match Reader::new().read_from_container(&mut cursor) {
+                            Ok(exif) => exif,
+                            Err(inner) => {
+                                eprintln!(
+                                    "Embedded preview missing EXIF segment for {}: {err}; fallback parse error: {inner}",
+                                    path.display()
+                                );
+                                return self.extract_raw_metadata(path);
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!("No EXIF data available for {}: {err}", path.display());
+                    return self.extract_raw_metadata(path);
+                }
+            }
+        };
+
+        let mut summary = ExtractedExif::default();
+        let mut json = Map::new();
+        let mut gps_lat_value: Option<[f64; 3]> = None;
+        let mut gps_lat_ref: Option<String> = None;
+        let mut gps_lon_value: Option<[f64; 3]> = None;
+        let mut gps_lon_ref: Option<String> = None;
+        let mut gps_alt_value: Option<f64> = None;
+        let mut gps_alt_ref: Option<u8> = None;
+
+        for field in exif.fields() {
+            let key = format!("{:?}.{:?}", field.ifd_num, field.tag);
+            json.insert(
+                key,
+                Value::String(field.display_value().with_unit(&exif).to_string()),
+            );
+
+            match field.tag {
+                Tag::DateTimeOriginal | Tag::DateTimeDigitized | Tag::DateTime => {
+                    if summary.captured_at.is_none() {
+                        summary.captured_at = parse_exif_datetime(&field.value);
+                    }
+                }
+                Tag::Make => {
+                    if summary.camera_make.is_none() {
+                        summary.camera_make = exif_string(&field.value);
+                    }
+                }
+                Tag::Model => {
+                    if summary.camera_model.is_none() {
+                        summary.camera_model = exif_string(&field.value);
+                    }
+                }
+                Tag::LensModel => {
+                    if summary.lens_model.is_none() {
+                        summary.lens_model = exif_string(&field.value);
+                    }
+                }
+                Tag::FocalLength => {
+                    if summary.focal_length.is_none() {
+                        summary.focal_length = rational_value(&field.value);
+                    }
+                }
+                Tag::FNumber => {
+                    if summary.aperture.is_none() {
+                        summary.aperture = rational_value(&field.value);
+                    }
+                }
+                Tag::ExposureTime => {
+                    if summary.shutter_speed.is_none() {
+                        summary.shutter_speed = rational_value(&field.value);
+                    }
+                }
+                Tag::PhotographicSensitivity | Tag::ISOSpeed => {
+                    if summary.iso.is_none() {
+                        summary.iso = int_value(&field.value);
+                    }
+                }
+                Tag::Orientation => {
+                    if summary.orientation.is_none() {
+                        summary.orientation = int_value(&field.value);
+                    }
+                }
+                Tag::GPSLatitude => {
+                    if let ExifValue::Rational(values) = &field.value {
+                        if values.len() >= 3 {
+                            gps_lat_value = Some([
+                                values[0].to_f64(),
+                                values[1].to_f64(),
+                                values[2].to_f64(),
+                            ]);
+                        }
+                    }
+                }
+                Tag::GPSLatitudeRef => {
+                    gps_lat_ref = exif_string(&field.value);
+                }
+                Tag::GPSLongitude => {
+                    if let ExifValue::Rational(values) = &field.value {
+                        if values.len() >= 3 {
+                            gps_lon_value = Some([
+                                values[0].to_f64(),
+                                values[1].to_f64(),
+                                values[2].to_f64(),
+                            ]);
+                        }
+                    }
+                }
+                Tag::GPSLongitudeRef => {
+                    gps_lon_ref = exif_string(&field.value);
+                }
+                Tag::GPSAltitude => {
+                    if let ExifValue::Rational(values) = &field.value {
+                        if let Some(raw) = values.get(0) {
+                            gps_alt_value = Some(raw.to_f64());
+                        }
+                    }
+                }
+                Tag::GPSAltitudeRef => {
+                    if let Some(value) = int_value(&field.value) {
+                        gps_alt_ref = Some(value as u8);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if summary.camera_make.is_none()
+            || summary.camera_model.is_none()
+            || summary.orientation.is_none()
+        {
+            if let Some(raw_meta) = self.extract_raw_metadata(path)? {
+                if summary.camera_make.is_none() {
+                    summary.camera_make = raw_meta.camera_make;
+                }
+                if summary.camera_model.is_none() {
+                    summary.camera_model = raw_meta.camera_model;
+                }
+                if summary.orientation.is_none() {
+                    summary.orientation = raw_meta.orientation;
+                }
+            }
+        }
+
+        summary.gps_latitude = gps_coordinate(gps_lat_value, gps_lat_ref.as_deref());
+        summary.gps_longitude = gps_coordinate(gps_lon_value, gps_lon_ref.as_deref());
+        summary.gps_altitude = gps_altitude(gps_alt_value, gps_alt_ref);
+
+        if !json.is_empty() {
+            summary.metadata_json = Some(Value::Object(json));
+        }
+
+        Ok(Some(summary))
     }
 
     fn modified_time(metadata: &fs::Metadata) -> Option<DateTime<Utc>> {
@@ -680,6 +972,15 @@ impl CatalogService {
             // Store images with no parent into a pseudo-root bucket.
             PathBuf::from("/")
         })
+    }
+
+    pub fn remove_image(&self, image_id: i64) -> Result<()> {
+        ImageKeyword::delete_for_image(&self.db, image_id)
+            .context("failed to delete image keywords")?;
+        Thumbnail::delete(&self.db, image_id).context("failed to delete image thumbnails")?;
+        Preview::delete(&self.db, image_id).context("failed to delete image previews")?;
+        Image::delete(&self.db, image_id).context("failed to delete image")?;
+        Ok(())
     }
 }
 
@@ -1101,5 +1402,108 @@ mod tests {
         assert_eq!(details.image.color_label.as_deref(), Some("red"));
         assert!(details.keywords.contains(&"sky".into()));
         assert!(details.keywords.contains(&"mountain".into()));
+    }
+}
+
+#[derive(Default)]
+struct ExtractedExif {
+    metadata_json: Option<Value>,
+    captured_at: Option<DateTime<Utc>>,
+    camera_make: Option<String>,
+    camera_model: Option<String>,
+    lens_model: Option<String>,
+    focal_length: Option<f64>,
+    aperture: Option<f64>,
+    shutter_speed: Option<f64>,
+    iso: Option<i64>,
+    orientation: Option<i64>,
+    gps_latitude: Option<f64>,
+    gps_longitude: Option<f64>,
+    gps_altitude: Option<f64>,
+}
+
+fn exif_string(value: &ExifValue) -> Option<String> {
+    match value {
+        ExifValue::Ascii(values) => values
+            .get(0)
+            .and_then(|raw| std::str::from_utf8(raw).ok())
+            .map(|s| s.trim_matches('\u{0}').trim().to_string())
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    }
+}
+
+fn parse_exif_datetime(value: &ExifValue) -> Option<DateTime<Utc>> {
+    let raw = exif_string(value)?;
+    NaiveDateTime::parse_from_str(raw.trim(), "%Y:%m:%d %H:%M:%S")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+fn rational_value(value: &ExifValue) -> Option<f64> {
+    match value {
+        ExifValue::Rational(values) if !values.is_empty() => Some(values[0].to_f64()),
+        ExifValue::SRational(values) if !values.is_empty() => Some(values[0].to_f64()),
+        _ => None,
+    }
+}
+
+fn int_value(value: &ExifValue) -> Option<i64> {
+    match value {
+        ExifValue::Byte(values) => values.get(0).map(|v| *v as i64),
+        ExifValue::Short(values) => values.get(0).map(|v| *v as i64),
+        ExifValue::Long(values) => values.get(0).map(|v| *v as i64),
+        ExifValue::SByte(values) => values.get(0).map(|v| *v as i64),
+        ExifValue::SShort(values) => values.get(0).map(|v| *v as i64),
+        ExifValue::SLong(values) => values.get(0).map(|v| *v as i64),
+        _ => None,
+    }
+}
+
+fn gps_coordinate(values: Option<[f64; 3]>, reference: Option<&str>) -> Option<f64> {
+    let components = values?;
+    let degrees = components[0];
+    let minutes = components[1];
+    let seconds = components[2];
+    let mut sign = 1.0;
+    if let Some(reference) = reference {
+        if matches!(
+            reference.trim().to_ascii_uppercase().as_str(),
+            "S" | "W"
+        ) {
+            sign = -1.0;
+        }
+    }
+    Some(sign * (degrees + minutes / 60.0 + seconds / 3600.0))
+}
+
+fn gps_altitude(value: Option<f64>, reference: Option<u8>) -> Option<f64> {
+    let mut result = value?;
+    if matches!(reference, Some(1)) {
+        result = -result;
+    }
+    Some(result)
+}
+
+fn sanitize_non_empty(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn raw_orientation_to_tag(orientation: RawOrientation) -> Option<i64> {
+    match orientation {
+        RawOrientation::Normal => Some(1),
+        RawOrientation::HorizontalFlip => Some(2),
+        RawOrientation::Rotate180 => Some(3),
+        RawOrientation::VerticalFlip => Some(4),
+        RawOrientation::Transpose => Some(5),
+        RawOrientation::Rotate90 => Some(6),
+        RawOrientation::Transverse => Some(7),
+        RawOrientation::Rotate270 => Some(8),
+        RawOrientation::Unknown => None,
     }
 }

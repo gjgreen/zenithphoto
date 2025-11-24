@@ -21,6 +21,7 @@ export struct VirtualCollectionItem {
 export struct ThumbnailItem {
     id: int,
     path: string,
+    display_name: string,
     display_thumb: image,
     rating: int,
     flag: string,
@@ -177,7 +178,7 @@ component FolderIcon inherits Rectangle {
     }
 }
 
-component FolderRow inherits Rectangle {
+export component FolderRow inherits Rectangle {
     in property <string> name;
     in property <bool> expanded;
     in property <int> level;
@@ -239,6 +240,7 @@ component FolderRow inherits Rectangle {
 component ThumbnailCard inherits Rectangle {
     in property <int> item-id;
     in property <string> path;
+    in property <string> display-name;
     in property <image> thumbnail;
     in property <bool> selected: false;
     in property <int> rating: 0;
@@ -247,8 +249,12 @@ component ThumbnailCard inherits Rectangle {
     in property <length> thumb-size: 200px;
     in property <length> card-width: 216px;
     in property <length> card-height: 272px;
+    property <bool> context-menu-visible: false;
+    property <length> context-menu-x: 0px;
+    property <length> context-menu-y: 0px;
     callback clicked(range_select: bool, toggle: bool);
     callback activated;
+    callback remove_requested(id: int);
 
     width: card-width;
     height: card-height;
@@ -282,7 +288,7 @@ component ThumbnailCard inherits Rectangle {
             }
         }
 
-        Text { text: path; font-size: 11px; wrap: no-wrap; overflow: elide; color: #d0d0d0; }
+        Text { text: display-name; font-size: 11px; wrap: no-wrap; overflow: elide; color: #d0d0d0; }
 
         badges := Rectangle {
             border-radius: 4px;
@@ -321,12 +327,70 @@ component ThumbnailCard inherits Rectangle {
         double-clicked => activated();
         pointer-event(event) => {
             if (event.kind == PointerEventKind.up) {
-                let toggle = event.modifiers.control || event.modifiers.meta;
-                clicked(event.modifiers.shift, toggle);
+                if (event.button == PointerEventButton.right) {
+                    context-menu-visible = true;
+                    context-menu-x = self.mouse_x;
+                    context-menu-y = self.mouse_y;
+                } else {
+                    context-menu-visible = false;
+                    let toggle = event.modifiers.control || event.modifiers.meta;
+                    clicked(event.modifiers.shift, toggle);
+                }
             }
         }
     }
 
+    if context-menu-visible: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: transparent;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.up && event.button != PointerEventButton.right) {
+                    context-menu-visible = false;
+                }
+            }
+            clicked => { context-menu-visible = false; }
+        }
+
+        menu_panel := Rectangle {
+            width: 190px;
+            height: 44px;
+            x: Math.max(0px, Math.min(root.context-menu-x - self.width / 2, parent.width - self.width));
+            y: Math.max(0px, Math.min(root.context-menu-y - self.height / 2, parent.height - self.height));
+            background: #1f1f1f;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #3a3a3a;
+            drop-shadow-color: #000000cc;
+            drop-shadow-offset-x: 0px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-blur: 10px;
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    context-menu-visible = false;
+                    remove_requested(root.item-id);
+                }
+            }
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                vertical-stretch: 1;
+                Text {
+                    text: "Remove from catalog";
+                    color: #f5f5f5;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
 }
 
 component MetaRow inherits HorizontalLayout {
@@ -387,6 +451,7 @@ export component FolioScreen inherits Rectangle {
     callback update_keywords(image_id: int, keywords: string);
     callback filters_changed(search: string, rating: int, flag: string, color_label: string);
     callback reset_thumbnail_scroll;
+    callback remove_image_from_catalog(id: int);
 
     property <length> thumbnail-size: 200px;
     property <length> thumbnail-gap: 12px;
@@ -394,6 +459,9 @@ export component FolioScreen inherits Rectangle {
     property <length> thumbnail-grid-padding-y: 0px;
     property <length> thumbnail-card-width: root.thumbnail-size + 16px;
     property <length> thumbnail-card-height: root.thumbnail-size + 72px;
+
+    property <int> image_id_to_remove: -1;
+    property <bool> show_remove_confirmation: false;
 
     background: #0f0f0f;
 
@@ -618,6 +686,7 @@ export component FolioScreen inherits Rectangle {
 
                                 item-id: thumb.id;
                                 path: thumb.path;
+                                display-name: thumb.display_name;
                                 thumbnail: thumb.display_thumb;
                                 selected: thumb.selected;
                                 rating: thumb.rating;
@@ -628,6 +697,10 @@ export component FolioScreen inherits Rectangle {
                                     root.thumbnail_selected(thumb.id, range-select, toggle);
                                 }
                                 activated => root.thumbnail_activated(thumb.id);
+                                remove_requested(id) => {
+                                    root.image_id_to_remove = id;
+                                    root.show_remove_confirmation = true;
+                                }
                             }
                         }
                     }
@@ -744,6 +817,57 @@ export component FolioScreen inherits Rectangle {
         }
     }
 
+    if root.show_remove_confirmation: Rectangle {
+        background: #000000aa;
+        width: 100%;
+        height: 100%;
+
+        dialog_content := Rectangle {
+            width: 300px;
+            height: 200px;
+            background: #2c2c2c;
+            border-radius: 8px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            
+            VerticalLayout {
+                padding: 20px;
+                spacing: 20px;
+                
+                Text {
+                    text: "Remove from catalog";
+                    font-size: 20px;
+                    font-weight: 700;
+                }
+                
+                Text {
+                    text: "Are you sure you want to remove this image from the catalog? This action cannot be undone.";
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    
+                    Button {
+                        text: "Remove";
+                        clicked => {
+                            root.remove_image_from_catalog(root.image_id_to_remove);
+                            root.image_id_to_remove = -1;
+                            root.show_remove_confirmation = false;
+                        }
+                    }
+                    
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.image_id_to_remove = -1;
+                            root.show_remove_confirmation = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
     reset_thumbnail_scroll => {
         thumb_scroll.viewport-y = 0px;
         thumb_scroll.viewport-x = 0px;

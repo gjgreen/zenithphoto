@@ -60,6 +60,7 @@ export component MainWindow inherits Window {
     callback update-keywords(image_id: int, keywords: string);
     callback filters-changed(search: string, rating: int, flag: string, color_label: string);
     callback reset-thumbnail-scroll();
+    callback remove-image-from-catalog(id: int);
     callback open-refine(image_id: int);
     callback apply-edits(
         image_id: int,
@@ -112,7 +113,7 @@ export component MainWindow inherits Window {
             }
 
             MenuItem {
-                title: "Import to Folio…";
+                title: "Import Photos…";
                 activated => root.import-photos-requested();
             }
 
@@ -234,6 +235,7 @@ export component MainWindow inherits Window {
                     label_changed(image_id, new_label) => root.label-changed(image_id, new_label);
                     update_keywords(image_id, keywords) => root.update-keywords(image_id, keywords);
                     filters_changed(search, rating, flag, color_label) => root.filters-changed(search, rating, flag, color_label);
+                    remove_image_from_catalog(image_id) => root.remove-image-from-catalog(image_id);
                 }
 
                 refine := RefineScreen {

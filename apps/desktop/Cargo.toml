@@ -21,9 +21,12 @@ directories = "5.0"
 thiserror = "1.0"
 walkdir = "2.5"
 futures = "0.3"
-image = { version = "0.24", default-features = false, features = ["png", "jpeg", "tiff"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+rawloader = "0.37"
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+rsraw = "0.1"
 
 [build-dependencies]
 slint-build = "1.8"
@@ -33,5 +36,12 @@ tempfile = "3.10"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
-windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 

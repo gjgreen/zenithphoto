@@ -136,7 +136,8 @@ impl ConfigStore {
         let normalized = CatalogPath::new(catalog).into_path();
         let ts = timestamp.to_string();
         self.update(|cfg| {
-            cfg.last_import_timestamps.insert(normalized.clone(), ts.clone());
+            cfg.last_import_timestamps
+                .insert(normalized.clone(), ts.clone());
             true
         })
     }

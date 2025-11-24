@@ -2,6 +2,7 @@
 
 mod config;
 mod import;
+mod raw;
 
 slint::include_modules!(); // from build.rs compiled ui/main.slint and catalog_dialog.slint
 
@@ -15,11 +16,13 @@ use engine::ImageEngine;
 use import::{
     import_images_with_callbacks, is_already_imported, parse_keywords, scan_directory_with_options,
     CancellationFlag, DuplicateStrategy, ImportCallbacks, ImportMethod, ImportProgress,
-    ImportStage, ScanOptions,
+    ImportStage, PairedImportCandidate, ScanOptions,
 };
 use rfd::{AsyncFileDialog, FileDialog};
-use slint::{Model, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint::{Model, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel, Weak};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,7 +79,11 @@ impl FolioSelection {
 }
 
 fn normalize_flag_value(flag: Option<&String>) -> String {
-    let val = flag.map(|s| s.as_str()).unwrap_or_default().trim().to_ascii_lowercase();
+    let val = flag
+        .map(|s| s.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     if val.is_empty() || val == "none" {
         "none".into()
     } else {
@@ -95,6 +102,14 @@ fn normalize_color_label_value(label: Option<&String>) -> String {
     } else {
         val
     }
+}
+
+fn display_name_from_path(path: &str) -> SharedString {
+    Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(SharedString::from)
+        .unwrap_or_else(|| SharedString::from(path))
 }
 
 struct FolioState {
@@ -145,11 +160,7 @@ impl FolioState {
     }
 
     fn refresh_volume_models(&mut self) {
-        let flattened: Vec<VolumeNode> = self
-            .volume_tree
-            .iter()
-            .map(flatten_volume_tree)
-            .collect();
+        let flattened: Vec<VolumeNode> = self.volume_tree.iter().map(flatten_volume_tree).collect();
         self.volumes.set_vec(flattened);
     }
 }
@@ -372,9 +383,13 @@ fn main() -> Result<(), slint::PlatformError> {
         let folio_state = folio_state.clone();
         let ui_weak = ui_weak.clone();
         ui.on_flag_changed(move |image_id, flag| {
-            if let Err(err) =
-                apply_flag_change(&catalog_state, &folio_state, &ui_weak, image_id, flag.as_str())
-            {
+            if let Err(err) = apply_flag_change(
+                &catalog_state,
+                &folio_state,
+                &ui_weak,
+                image_id,
+                flag.as_str(),
+            ) {
                 eprintln!("Failed to update flag: {err}");
             }
         });
@@ -407,8 +422,7 @@ fn main() -> Result<(), slint::PlatformError> {
             {
                 eprintln!("Failed to update keywords: {err}");
             } else {
-                if let Err(err) =
-                    refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64)
+                if let Err(err) = refresh_metadata_panel(&catalog_state, &ui_weak, image_id as i64)
                 {
                     eprintln!("Failed to refresh metadata after keywords: {err}");
                 }
@@ -433,12 +447,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 flag: flag.to_string(),
                 color_label: color_label.to_string(),
             };
-            reload_current_selection(
-                &catalog_state,
-                &folio_state,
-                &ui_weak,
-                &config_store,
-            );
+            reload_current_selection(&catalog_state, &folio_state, &ui_weak, &config_store);
         });
     }
 
@@ -554,11 +563,34 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    {
+        let catalog_state = catalog_state.clone();
+        let folio_state = folio_state.clone();
+        let ui_weak = ui_weak.clone();
+        let config_store = config_store.clone();
+        ui.on_remove_image_from_catalog(move |image_id| {
+            if let Err(err) = remove_image_from_catalog(&catalog_state, image_id) {
+                eprintln!("Failed to remove image: {err}");
+            } else {
+                reload_current_selection(&catalog_state, &folio_state, &ui_weak, &config_store);
+            }
+        });
+    }
+
     ui.on_exit_requested(|| {
         slint::quit_event_loop().ok();
     });
 
     ui.run()
+}
+
+fn remove_image_from_catalog(catalog_state: &CatalogState, image_id: i32) -> anyhow::Result<()> {
+    let guard = catalog_state.borrow();
+    let Some(session) = guard.as_ref() else {
+        return Err(anyhow!("no active catalog"));
+    };
+
+    session.service.remove_image(image_id as i64)
 }
 
 fn spawn_open_catalog_dialog(
@@ -727,12 +759,17 @@ struct ImportViewState {
     /// Paths that are currently marked for import (checked=true).
     selected_paths: Rc<VecModel<SharedString>>,
     errors: Rc<VecModel<SharedString>>,
-    directories: Rc<VecModel<SharedString>>,
+    folder_rows: Rc<VecModel<FolderTreeRow>>,
+    folder_tree: Vec<FileBrowserNode>,
+    candidates: HashMap<ImageId, import::PairedImportCandidate>,
     scan_cancel: CancellationFlag,
     import_cancel: CancellationFlag,
     /// Tracks highlighted selection separately from import checkboxes.
     selection: SelectionState,
     next_image_id: ImageId,
+    allow_duplicates: bool,
+    selectable_total: i32,
+    ui_handle: Option<Weak<ImportPhotosScreen>>,
 }
 
 impl ImportViewState {
@@ -741,11 +778,16 @@ impl ImportViewState {
             thumbnails: Rc::new(VecModel::default()),
             selected_paths: Rc::new(VecModel::default()),
             errors: Rc::new(VecModel::default()),
-            directories: Rc::new(VecModel::default()),
+            folder_rows: Rc::new(VecModel::default()),
+            folder_tree: Vec::new(),
+            candidates: HashMap::new(),
             scan_cancel: CancellationFlag::default(),
             import_cancel: CancellationFlag::default(),
             selection: SelectionState::default(),
             next_image_id: 1,
+            allow_duplicates: false,
+            selectable_total: 0,
+            ui_handle: None,
         }
     }
 
@@ -757,6 +799,9 @@ impl ImportViewState {
         self.scan_cancel = CancellationFlag::default();
         self.selection = SelectionState::default();
         self.next_image_id = 1;
+        self.candidates.clear();
+        self.selectable_total = 0;
+        self.update_master_checkbox(0);
     }
 
     fn is_selectable_id(&self, id: ImageId) -> bool {
@@ -806,17 +851,101 @@ impl ImportViewState {
         }
     }
 
-    fn rebuild_checked_paths(&self) {
+    fn rebuild_checked_paths(&mut self) {
         let mut paths = Vec::new();
         let mut seen = HashSet::new();
+        let mut selectable_total = 0;
         for idx in 0..self.thumbnails.row_count() {
             if let Some(thumb) = self.thumbnails.row_data(idx) {
-                if thumb.checked && thumb.selectable && seen.insert(thumb.path.clone()) {
-                    paths.push(thumb.path);
+                if thumb.selectable {
+                    selectable_total += 1;
+                    if thumb.checked && seen.insert(thumb.path.clone()) {
+                        paths.push(thumb.path);
+                    }
                 }
             }
         }
-        self.selected_paths.set_vec(paths);
+        self.selected_paths.set_vec(paths.clone());
+        self.selectable_total = selectable_total;
+        self.update_master_checkbox(paths.len() as i32);
+    }
+
+    fn update_master_checkbox(&self, checked_count: i32) {
+        if let Some(handle) = self.ui_handle.as_ref().and_then(|h| h.upgrade()) {
+            handle.set_all_selectable_checked(
+                self.selectable_total > 0 && checked_count == self.selectable_total,
+            );
+        }
+    }
+
+    fn set_ui_handle(&mut self, handle: Weak<ImportPhotosScreen>) {
+        self.ui_handle = Some(handle);
+        self.update_master_checkbox(0);
+    }
+
+    fn checked_assets(&self) -> Vec<import::PairedImportCandidate> {
+        let mut assets = Vec::new();
+        for idx in 0..self.thumbnails.row_count() {
+            if let Some(thumb) = self.thumbnails.row_data(idx) {
+                if thumb.checked && thumb.selectable {
+                    if let Some(asset) = self.candidates.get(&thumb.id) {
+                        assets.push(asset.clone());
+                    }
+                }
+            }
+        }
+        assets
+    }
+
+    fn update_duplicate_selectable(&mut self) {
+        let allow = self.allow_duplicates;
+        for idx in 0..self.thumbnails.row_count() {
+            if let Some(mut thumb) = self.thumbnails.row_data(idx) {
+                let new_selectable = allow || !thumb.already_imported;
+                if thumb.selectable != new_selectable {
+                    thumb.selectable = new_selectable;
+                    if !new_selectable && thumb.checked {
+                        thumb.checked = false;
+                    }
+                    self.thumbnails.set_row_data(idx, thumb);
+                }
+            }
+        }
+        self.apply_selection_flags();
+        self.rebuild_checked_paths();
+    }
+
+    fn set_allow_duplicates(&mut self, allow: bool) {
+        if self.allow_duplicates == allow {
+            return;
+        }
+        self.allow_duplicates = allow;
+        self.update_duplicate_selectable();
+    }
+
+    fn refresh_folder_rows(&mut self) {
+        let mut rows = Vec::new();
+        flatten_file_browser(&self.folder_tree, 0, &mut rows);
+        self.folder_rows.set_vec(rows);
+    }
+
+    fn set_file_browser_roots(&mut self, roots: Vec<FileBrowserNode>) {
+        self.folder_tree = roots;
+        self.refresh_folder_rows();
+    }
+
+    fn ensure_folder_visible(&mut self, path: &Path) {
+        ensure_browser_path(&mut self.folder_tree, path);
+        self.refresh_folder_rows();
+    }
+
+    fn toggle_folder_node(&mut self, path: &Path) -> bool {
+        if toggle_browser_node(&mut self.folder_tree, path) {
+            self.refresh_folder_rows();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -826,18 +955,247 @@ fn placeholder_image() -> slint::Image {
     slint::Image::from_rgba8(buf)
 }
 
-fn refresh_directory_model(model: &Rc<VecModel<SharedString>>, base: &Path) {
-    let mut entries = vec![SharedString::from(base.to_string_lossy().to_string())];
-    if let Ok(read_dir) = fs::read_dir(base) {
-        for entry in read_dir.flatten() {
+fn detect_filesystem_roots() -> Vec<FileBrowserNode> {
+    let mut roots = system_root_nodes();
+    if roots.is_empty() {
+        if let Ok(current) = std::env::current_dir() {
+            roots.push(FileBrowserNode::new(
+                current.to_string_lossy().to_string(),
+                current,
+            ));
+        }
+    }
+    roots.sort_by(|a, b| compare_names(&a.name, &b.name));
+    roots
+}
+
+#[cfg(target_os = "windows")]
+fn system_root_nodes() -> Vec<FileBrowserNode> {
+    let mut nodes = Vec::new();
+    for letter in b'A'..=b'Z' {
+        let drive = format!("{}:", (letter as char).to_ascii_uppercase());
+        let root_path = PathBuf::from(format!("{drive}\\"));
+        if !root_path.is_dir() {
+            continue;
+        }
+        let display_name = match volume_label_for_drive(&drive) {
+            Some(label) if !label.is_empty() => format!("{label} ({drive})"),
+            _ => drive.clone(),
+        };
+        nodes.push(FileBrowserNode::new(display_name, root_path));
+    }
+    nodes
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_root_nodes() -> Vec<FileBrowserNode> {
+    vec![FileBrowserNode::new("/".into(), PathBuf::from("/"))]
+}
+
+#[derive(Clone)]
+struct FileBrowserNode {
+    name: String,
+    path: PathBuf,
+    expanded: bool,
+    children_loaded: bool,
+    has_children: bool,
+    children: Vec<FileBrowserNode>,
+}
+
+impl FileBrowserNode {
+    fn new(name: String, path: PathBuf) -> Self {
+        let has_children = has_subdirectories(&path);
+        Self {
+            name,
+            path,
+            expanded: false,
+            children_loaded: false,
+            has_children,
+            children: Vec::new(),
+        }
+    }
+}
+
+fn has_subdirectories(path: &Path) -> bool {
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
             if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                entries.push(SharedString::from(
-                    entry.path().to_string_lossy().to_string(),
-                ));
+                if is_hidden_folder(entry.path().as_path()) {
+                    continue;
+                }
+                return true;
             }
         }
     }
-    model.set_vec(entries);
+    false
+}
+
+fn load_children(node: &mut FileBrowserNode) {
+    if node.children_loaded {
+        return;
+    }
+
+    node.children.clear();
+    if let Ok(entries) = fs::read_dir(&node.path) {
+        let mut children = Vec::new();
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                let path = entry.path();
+                if is_hidden_folder(path.as_path()) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let has_children = has_subdirectories(path.as_path());
+                let child = FileBrowserNode {
+                    name,
+                    path,
+                    expanded: false,
+                    children_loaded: false,
+                    has_children,
+                    children: Vec::new(),
+                };
+                children.push(child);
+            }
+        }
+        children.sort_by(|a, b| compare_names(&a.name, &b.name));
+        node.has_children = !children.is_empty();
+        node.children = children;
+    }
+    node.children_loaded = true;
+}
+
+fn is_hidden_folder(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+        if let Ok(metadata) = fs::metadata(path) {
+            let attrs = metadata.file_attributes();
+            if attrs & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0 {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with('.'))
+            .unwrap_or(false)
+    }
+}
+
+fn flatten_file_browser(nodes: &[FileBrowserNode], level: i32, out: &mut Vec<FolderTreeRow>) {
+    for node in nodes {
+        out.push(FolderTreeRow {
+            name: SharedString::from(node.name.clone()),
+            full_path: SharedString::from(node.path.to_string_lossy().to_string()),
+            level,
+            expanded: node.expanded,
+            has_children: node.has_children,
+        });
+        if node.expanded {
+            flatten_file_browser(&node.children, level + 1, out);
+        }
+    }
+}
+
+fn ensure_browser_path(tree: &mut Vec<FileBrowserNode>, path: &Path) {
+    let (root_name, root_path, parts) = split_volume_components(path);
+    let mut idx = tree
+        .iter()
+        .position(|node| path_equals(&node.path, &root_path));
+    if idx.is_none() {
+        tree.push(FileBrowserNode::new(root_name, root_path.clone()));
+        tree.sort_by(|a, b| compare_names(&a.name, &b.name));
+        idx = tree
+            .iter()
+            .position(|node| path_equals(&node.path, &root_path));
+    }
+
+    if let Some(root_idx) = idx {
+        if let Some(node) = tree.get_mut(root_idx) {
+            ensure_branch(node, &parts);
+        }
+    }
+}
+
+fn ensure_branch(node: &mut FileBrowserNode, parts: &[String]) {
+    if parts.is_empty() {
+        return;
+    }
+
+    node.expanded = true;
+    if !node.children_loaded {
+        load_children(node);
+    }
+
+    let next = &parts[0];
+    let mut child_path = node.path.clone();
+    child_path.push(next);
+    let idx = node
+        .children
+        .iter()
+        .position(|child| path_equals(&child.path, &child_path));
+    let child_idx = if let Some(position) = idx {
+        position
+    } else {
+        let new_child = FileBrowserNode::new(next.clone(), child_path.clone());
+        node.children.push(new_child);
+        node.children
+            .sort_by(|a, b| compare_names(&a.name, &b.name));
+        node.children
+            .iter()
+            .position(|child| path_equals(&child.path, &child_path))
+            .unwrap()
+    };
+
+    if let Some(child) = node.children.get_mut(child_idx) {
+        ensure_branch(child, &parts[1..]);
+    }
+}
+
+fn toggle_browser_node(nodes: &mut [FileBrowserNode], target: &Path) -> bool {
+    for node in nodes.iter_mut() {
+        if path_equals(&node.path, target) {
+            if !node.expanded {
+                load_children(node);
+            }
+            node.expanded = !node.expanded;
+            return true;
+        }
+
+        if toggle_browser_node(&mut node.children, target) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn path_equals(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn path_equals(a: &Path, b: &Path) -> bool {
+    a == b
+}
+
+fn compare_names(a: &str, b: &str) -> Ordering {
+    #[cfg(target_os = "windows")]
+    {
+        let lower_a = a.to_ascii_lowercase();
+        let lower_b = b.to_ascii_lowercase();
+        lower_a.cmp(&lower_b).then_with(|| a.cmp(b))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        a.cmp(b)
+    }
 }
 
 fn select_single(state: &Rc<RefCell<ImportViewState>>, id: ImageId) {
@@ -932,7 +1290,7 @@ fn clear_selection(state: &Rc<RefCell<ImportViewState>>) {
 }
 
 fn set_all_checked(state: &Rc<RefCell<ImportViewState>>, checked: bool) {
-    let guard = state.borrow_mut();
+    let mut guard = state.borrow_mut();
     for idx in 0..guard.thumbnails.row_count() {
         if let Some(mut thumb) = guard.thumbnails.row_data(idx) {
             if thumb.selectable {
@@ -983,7 +1341,7 @@ fn start_scan_for_directory(
     {
         let mut guard = state.borrow_mut();
         guard.reset_for_scan();
-        refresh_directory_model(&guard.directories, &path);
+        guard.ensure_folder_visible(&path);
     }
 
     if let Some(ui) = import_ui.upgrade() {
@@ -1013,21 +1371,32 @@ fn start_scan_for_directory(
         on_candidate: Some(Arc::new({
             let seen = seen.clone();
             let catalog_for_scan = catalog_for_scan.clone();
-            move |candidate| {
-                if !seen.borrow_mut().insert(candidate.path.clone()) {
+            move |mut candidate| {
+                let primary_path = candidate
+                    .primary_path()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| candidate.display_path.clone());
+                if !seen.borrow_mut().insert(primary_path.clone()) {
                     return;
                 }
 
                 let already_imported = catalog_for_scan
                     .as_ref()
-                    .map(|svc| is_already_imported(svc, &candidate.path))
+                    .map(|svc| is_already_imported(svc, &primary_path))
                     .unwrap_or(false);
-                let selectable = !already_imported;
-                let checked = selectable;
-                let display_thumb = candidate.thumb.unwrap_or_else(placeholder_image);
-                let path_text: SharedString = candidate.path.to_string_lossy().to_string().into();
+                let display_thumb = candidate.thumb.take().unwrap_or_else(placeholder_image);
+                let path_text: SharedString =
+                    candidate.display_path.to_string_lossy().to_string().into();
+                let display_name = candidate
+                    .display_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| candidate.display_path.to_string_lossy().to_string());
 
                 let mut guard = state_for_candidates.borrow_mut();
+                let selectable = guard.allow_duplicates || !already_imported;
+                let checked = selectable;
                 let id = guard.next_image_id;
                 guard.next_image_id += 1;
 
@@ -1041,16 +1410,20 @@ fn start_scan_for_directory(
                 guard.thumbnails.push(ImportThumbnail {
                     id,
                     path: path_text.clone(),
+                    display_name: SharedString::from(display_name),
                     display_thumb,
                     selected: is_selected,
                     checked,
                     already_imported,
                     selectable,
                 });
+                guard.candidates.insert(id, candidate.asset.clone());
                 guard.apply_selection_flags();
                 guard.rebuild_checked_paths();
                 if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_status_text(format!("Queued {}", candidate.path.display()).into());
+                    ui.set_status_text(
+                        format!("Queued {}", candidate.display_path.display()).into(),
+                    );
                 }
             }
         })),
@@ -1089,7 +1462,7 @@ fn begin_import(
     import_ui: &slint::Weak<ImportPhotosScreen>,
     state: Rc<RefCell<ImportViewState>>,
     active_import: Rc<RefCell<Option<ImportPhotosScreen>>>,
-    file_paths: Vec<PathBuf>,
+    candidates: Vec<PairedImportCandidate>,
     keywords: Vec<String>,
     method: ImportMethod,
     destination_directory: Option<PathBuf>,
@@ -1099,7 +1472,7 @@ fn begin_import(
     folio_state: Rc<RefCell<FolioState>>,
     config_store: ConfigStore,
 ) {
-    if file_paths.is_empty() {
+    if candidates.is_empty() {
         if let Some(ui) = import_ui.upgrade() {
             ui.set_status_text("Select at least one photo to import".into());
         }
@@ -1192,7 +1565,7 @@ fn begin_import(
 
         let result = import_images_with_callbacks(
             &service,
-            &file_paths,
+            &candidates,
             &keywords,
             method,
             destination_directory.clone(),
@@ -1223,18 +1596,20 @@ fn begin_import(
 
                     let last_import_ts = report.batch_started_at.map(|ts| ts.to_rfc3339());
                     if let Some(ts) = &last_import_ts {
-                        if let Err(err) =
-                            config_store_for_refresh.record_last_import(&session_path_for_refresh, ts)
+                        if let Err(err) = config_store_for_refresh
+                            .record_last_import(&session_path_for_refresh, ts)
                         {
                             eprintln!("Failed to persist last import timestamp: {err}");
                         }
                     }
                     if let Some(ts) = last_import_ts {
-                        folio_state_for_refresh
-                            .borrow_mut()
-                            .last_import_timestamp = Some(ts);
+                        folio_state_for_refresh.borrow_mut().last_import_timestamp = Some(ts);
                     }
-                    refresh_folio_tree(&ui_refresh, &catalog_state_for_refresh, &folio_state_for_refresh);
+                    refresh_folio_tree(
+                        &ui_refresh,
+                        &catalog_state_for_refresh,
+                        &folio_state_for_refresh,
+                    );
                     reload_current_selection(
                         &catalog_state_for_refresh,
                         &folio_state_for_refresh,
@@ -1292,18 +1667,30 @@ fn launch_import_flow(
 
     let view_state = Rc::new(RefCell::new(ImportViewState::new()));
     {
-        let guard = view_state.borrow();
+        let mut guard = view_state.borrow_mut();
+        guard.set_file_browser_roots(detect_filesystem_roots());
         import_ui.set_thumbnails(guard.thumbnails.clone().into());
         import_ui.set_selected_paths(guard.selected_paths.clone().into());
         import_ui.set_error_messages(guard.errors.clone().into());
-        import_ui.set_directories(guard.directories.clone().into());
+        import_ui.set_folder_tree(guard.folder_rows.clone().into());
+    }
+    {
+        let mut guard = view_state.borrow_mut();
+        guard.set_allow_duplicates(import_ui.get_allow_duplicates());
     }
 
     let import_ui_weak = import_ui.as_weak();
+    {
+        view_state
+            .borrow_mut()
+            .set_ui_handle(import_ui_weak.clone());
+    }
 
     // Prefill with the user's home directory for convenience.
     if let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) {
-        refresh_directory_model(&view_state.borrow().directories, &home);
+        {
+            view_state.borrow_mut().ensure_folder_visible(&home);
+        }
         import_ui.set_selected_directory(home.to_string_lossy().to_string().into());
     }
 
@@ -1339,6 +1726,14 @@ fn launch_import_flow(
                 catalog_path.clone(),
                 PathBuf::from(path.as_str()),
             );
+        });
+    }
+
+    {
+        let view_state = view_state.clone();
+        import_ui.on_folder_toggled(move |path| {
+            let target = PathBuf::from(path.as_str());
+            view_state.borrow_mut().toggle_folder_node(target.as_path());
         });
     }
 
@@ -1400,6 +1795,13 @@ fn launch_import_flow(
     }
 
     {
+        let view_state = view_state.clone();
+        import_ui.on_allow_duplicates_changed(move |allow| {
+            view_state.borrow_mut().set_allow_duplicates(allow);
+        });
+    }
+
+    {
         let import_ui_weak = import_ui_weak.clone();
         let view_state = view_state.clone();
         let active_import = active_import.clone();
@@ -1426,19 +1828,15 @@ fn launch_import_flow(
         let config_store = config_store.clone();
         let ui_main = ui_weak.clone();
         import_ui.on_perform_import(
-            move |_source_dir, destination_dir, paths, keyword_text, method_str| {
+            move |_source_dir, destination_dir, _paths, keyword_text, method_str| {
                 let allow_duplicates = import_ui_weak
                     .upgrade()
                     .map(|ui| ui.get_allow_duplicates())
                     .unwrap_or(false);
-                let mut seen_files = HashSet::new();
-                let mut files: Vec<PathBuf> = Vec::new();
-                for p in paths.iter() {
-                    let path_buf = PathBuf::from(p.as_str());
-                    if seen_files.insert(path_buf.clone()) {
-                        files.push(path_buf);
-                    }
-                }
+                let selected_assets = {
+                    let guard = view_state.borrow();
+                    guard.checked_assets()
+                };
                 let keywords = parse_keywords(keyword_text.as_str());
                 let method = match method_str.as_str() {
                     "Copy" => ImportMethod::Copy,
@@ -1460,7 +1858,7 @@ fn launch_import_flow(
                     &import_ui_weak,
                     view_state.clone(),
                     active_import.clone(),
-                    files,
+                    selected_assets,
                     keywords,
                     method,
                     destination,
@@ -2031,8 +2429,7 @@ fn apply_selection(
                 ui.set_selected_virtual_collection("last_import".into());
                 ui.set_selected_folder_path("".into());
             }
-            let since =
-                last_import_timestamp_for_catalog(catalog_state, folio_state, config_store);
+            let since = last_import_timestamp_for_catalog(catalog_state, folio_state, config_store);
             load_last_import(catalog_state, folio_state, ui_weak, since.as_deref());
         }
         FolioSelection::Folder(path) => {
@@ -2040,12 +2437,7 @@ fn apply_selection(
                 ui.set_selected_folder_path(path.clone().into());
                 ui.set_selected_virtual_collection("".into());
             }
-            load_folder_thumbnails(
-                catalog_state,
-                folio_state,
-                ui_weak,
-                Path::new(&path),
-            );
+            load_folder_thumbnails(catalog_state, folio_state, ui_weak, Path::new(&path));
         }
     }
 }
@@ -2099,13 +2491,16 @@ fn build_thumbnail_items(
             total_size += sz as u64;
         }
 
-        let display_thumb = load_or_generate_thumbnail(service, &img).unwrap_or_else(placeholder_image);
+        let display_thumb =
+            load_or_generate_thumbnail(service, &img).unwrap_or_else(placeholder_image);
         let flag = normalize_flag_value(img.flag.as_ref());
         let color_label = normalize_color_label_value(img.color_label.as_ref());
+        let display_name = display_name_from_path(&img.original_path);
 
         items.push(ThumbnailItem {
             id: img.id as i32,
             path: SharedString::from(img.original_path.clone()),
+            display_name,
             display_thumb,
             selected: false,
             rating: img.rating.unwrap_or(0) as i32,
@@ -2292,12 +2687,25 @@ fn thumbnail_to_image(thumb: &Thumbnail) -> Option<slint::Image> {
 }
 
 fn decode_thumbnail(bytes: &[u8]) -> Option<slint::Image> {
-    let img = image::load_from_memory(bytes).ok()?;
+    let img = load_image_from_memory_safe(bytes)?;
     let thumb = fit_into_square(&img, 256);
     let (width, height) = thumb.dimensions();
-    let buffer =
-        SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(thumb.as_raw(), width, height);
+    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(thumb.as_raw(), width, height);
     Some(slint::Image::from_rgba8(buffer))
+}
+
+fn load_image_from_memory_safe(bytes: &[u8]) -> Option<image::DynamicImage> {
+    match catch_unwind(AssertUnwindSafe(|| image::load_from_memory(bytes))) {
+        Ok(Ok(img)) => Some(img),
+        Ok(Err(err)) => {
+            eprintln!("Failed to decode thumbnail bytes: {err}");
+            None
+        }
+        Err(_) => {
+            eprintln!("Thumbnail decoder panicked while decoding cached bytes");
+            None
+        }
+    }
 }
 
 fn fit_into_square(img: &image::DynamicImage, max_dim: u32) -> image::RgbaImage {
@@ -2309,8 +2717,7 @@ fn fit_into_square(img: &image::DynamicImage, max_dim: u32) -> image::RgbaImage 
         return resized;
     }
 
-    let mut canvas =
-        image::RgbaImage::from_pixel(max_dim, max_dim, image::Rgba([16, 16, 16, 255]));
+    let mut canvas = image::RgbaImage::from_pixel(max_dim, max_dim, image::Rgba([16, 16, 16, 255]));
     let offset_x = (max_dim - w) / 2;
     let offset_y = (max_dim - h) / 2;
     image::imageops::overlay(&mut canvas, &resized, offset_x.into(), offset_y.into());
@@ -2442,6 +2849,7 @@ fn refresh_thumbnail(
             ThumbnailItem {
                 id: image.id as i32,
                 path: SharedString::from(image.original_path.clone()),
+                display_name: display_name_from_path(&image.original_path),
                 display_thumb,
                 rating: image.rating.unwrap_or(0) as i32,
                 flag: SharedString::from(normalize_flag_value(image.flag.as_ref())),

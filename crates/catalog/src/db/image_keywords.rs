@@ -75,42 +75,86 @@ impl ImageKeyword {
         Ok(())
     }
 
-    pub fn delete<H: DbHandle>(db: &H, image_id: i64, keyword_id: i64) -> DbResult<()> {
-        db.execute(
-            "DELETE FROM image_keywords WHERE image_id = ?1 AND keyword_id = ?2",
-            params![image_id, keyword_id],
-        )
-        .with_context(|| {
-            format!(
-                "failed to delete image_keywords image_id={} keyword_id={}",
-                image_id, keyword_id
+        pub fn delete<H: DbHandle>(db: &H, image_id: i64, keyword_id: i64) -> DbResult<()> {
+
+            db.execute(
+
+                "DELETE FROM image_keywords WHERE image_id = ?1 AND keyword_id = ?2",
+
+                params![image_id, keyword_id],
+
             )
-        })?;
-        Ok(())
-    }
 
-    pub fn list_keywords_for_image<H: DbHandle>(db: &H, image_id: i64) -> DbResult<Vec<Keyword>> {
-        query_all(
-            db,
-            "SELECT k.id, k.keyword
-             FROM keywords k
-             INNER JOIN image_keywords ik ON ik.keyword_id = k.id
-             WHERE ik.image_id = ?1
-             ORDER BY k.keyword",
-            params![image_id],
-            Keyword::from_row,
-        )
-    }
+            .with_context(|| {
 
-    fn from_row(row: &rusqlite::Row<'_>) -> DbResult<Self> {
-        Ok(Self {
-            image_id: row.get(0)?,
-            keyword_id: row.get(1)?,
-            assigned_at: crate::db::parse_datetime(row.get::<_, String>(2)?, "assigned_at")?,
-        })
-    }
+                format!(
+
+                    "failed to delete image_keywords image_id={} keyword_id={}",
+
+                    image_id, keyword_id
+
+                )
+
+            })?;
+
+            Ok(())
+
+        }
+
+    
+
+        pub fn delete_for_image<H: DbHandle>(db: &H, image_id: i64) -> DbResult<()> {
+
+            db.execute(
+
+                "DELETE FROM image_keywords WHERE image_id = ?1",
+
+                params![image_id],
+
+            )
+
+            .with_context(|| format!("failed to delete image_keywords for image_id={image_id}"))?;
+
+            Ok(())
+
+        }
+
+    
+
+        pub fn list_keywords_for_image<H: DbHandle>(db: &H, image_id: i64) -> DbResult<Vec<Keyword>> {
+
+            query_all(
+
+                db,
+
+                "SELECT k.id, k.keyword
+
+                 FROM keywords k
+
+                 INNER JOIN image_keywords ik ON ik.keyword_id = k.id
+
+                 WHERE ik.image_id = ?1
+
+                 ORDER BY k.keyword",
+
+                params![image_id],
+
+                Keyword::from_row,
+
+            )
+
+        }
+
+    
+
+        fn from_row(row: &rusqlite::Row<'_>) -> DbResult<Self> {
+            Ok(Self {
+                image_id: row.get(0)?,
+                keyword_id: row.get(1)?,
+                assigned_at: crate::db::parse_datetime(row.get::<_, String>(2)?, "assigned_at")?,
+            })
+        }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
